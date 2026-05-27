@@ -101,6 +101,13 @@ describe('Language Detection', () => {
     expect(detectLanguage('stdio.h', '#ifndef STDIO_H\nvoid printf();\n#endif\n')).toBe('c');
   });
 
+  it('should detect Verilog and SystemVerilog files', () => {
+    expect(detectLanguage('rtl/top.v')).toBe('verilog');
+    expect(detectLanguage('rtl/top.vh')).toBe('verilog');
+    expect(detectLanguage('rtl/top.sv')).toBe('systemverilog');
+    expect(detectLanguage('rtl/top.svh')).toBe('systemverilog');
+  });
+
   it('should return unknown for unsupported extensions', () => {
     expect(detectLanguage('styles.css')).toBe('unknown');
     expect(detectLanguage('data.json')).toBe('unknown');
@@ -129,6 +136,8 @@ describe('Language Support', () => {
     expect(languages).toContain('swift');
     expect(languages).toContain('kotlin');
     expect(languages).toContain('dart');
+    expect(languages).toContain('verilog');
+    expect(languages).toContain('systemverilog');
   });
 });
 
@@ -4256,6 +4265,188 @@ local count = 0
       const vars = result.nodes.filter((n) => n.kind === 'variable').map((n) => n.name);
       expect(vars).toContain('count');
     });
+  });
+});
+
+// =============================================================================
+// Verilog / SystemVerilog
+// =============================================================================
+
+describe('Verilog/SystemVerilog Extraction', () => {
+  it('should report Verilog and SystemVerilog as supported', () => {
+    expect(isLanguageSupported('verilog')).toBe(true);
+    expect(isLanguageSupported('systemverilog')).toBe(true);
+    expect(getSupportedLanguages()).toContain('verilog');
+    expect(getSupportedLanguages()).toContain('systemverilog');
+  });
+
+  it('should extract Verilog modules, parameters, nets, functions, and instances', () => {
+    const code = `
+module child #(parameter WIDTH = 8) (
+  input clk,
+  input [WIDTH-1:0] din,
+  output [WIDTH-1:0] dout
+);
+assign dout = din;
+endmodule
+
+module top #(parameter WIDTH = 8) (
+  input clk,
+  input [WIDTH-1:0] din,
+  output [WIDTH-1:0] dout
+);
+wire ready;
+
+function [WIDTH-1:0] pass(input [WIDTH-1:0] value);
+  pass = value;
+endfunction
+
+child #(.WIDTH(WIDTH)) u_child (
+  .clk(clk),
+  .din(pass(din)),
+  .dout(dout)
+);
+endmodule
+`;
+    const result = extractFromSource('rtl/top.v', code);
+
+    const modules = result.nodes.filter((n) => n.kind === 'module').map((n) => n.name);
+    expect(modules).toEqual(expect.arrayContaining(['child', 'top']));
+
+    const params = result.nodes.filter((n) => n.kind === 'parameter').map((n) => n.name);
+    expect(params).toContain('WIDTH');
+
+    const nets = result.nodes.filter((n) => n.kind === 'variable').map((n) => n.name);
+    expect(nets).toEqual(expect.arrayContaining(['clk', 'din', 'dout', 'ready', 'u_child']));
+
+    const pass = result.nodes.find((n) => n.kind === 'function' && n.name === 'pass');
+    expect(pass).toBeDefined();
+
+    const childInstance = result.nodes.find((n) => n.kind === 'variable' && n.name === 'u_child');
+    expect(childInstance?.signature).toContain('.din (pass(din))');
+
+    const instantiates = result.unresolvedReferences.find(
+      (r) => r.referenceKind === 'instantiates' && r.referenceName === 'child'
+    );
+    expect(instantiates).toBeDefined();
+
+    const connects = result.unresolvedReferences.find(
+      (r) => r.referenceKind === 'connects' && r.referenceName === 'child'
+    );
+    expect(connects).toBeDefined();
+
+    const call = result.unresolvedReferences.find(
+      (r) => r.referenceKind === 'calls' && r.referenceName === 'pass'
+    );
+    expect(call).toBeDefined();
+  });
+
+  it('should keep only active Verilog macro branches and emit port_connection edges', () => {
+    const previousDefines = process.env.CODEGRAPH_VERILOG_DEFINES;
+    delete process.env.CODEGRAPH_VERILOG_DEFINES;
+
+    try {
+      const code = `
+module child (
+  input clk,
+  input din,
+  output dout
+);
+endmodule
+
+module top (
+  input clk,
+  input loop_data,
+  input normal_data,
+  output data_out
+);
+child u_child (
+  .clk(clk),
+` + '`ifdef LOOPBACK' + `
+  .din(loop_data),
+` + '`else' + `
+  .din(normal_data),
+` + '`endif' + `
+  .dout(data_out)
+);
+endmodule
+`;
+      const result = extractFromSource('rtl/top.v', code);
+      const instance = result.nodes.find((n) => n.kind === 'variable' && n.name === 'u_child');
+      expect(instance?.signature).toContain('.din (normal_data)');
+      expect(instance?.signature).not.toContain('loop_data');
+
+      const normalData = result.nodes.find((n) => n.kind === 'variable' && n.name === 'normal_data');
+      const loopData = result.nodes.find((n) => n.kind === 'variable' && n.name === 'loop_data');
+      const portEdges = result.edges.filter((e) => e.kind === 'port_connection');
+      expect(portEdges.some((e) => (
+        e.source === instance?.id &&
+        e.target === normalData?.id &&
+        e.metadata?.formalPort === 'din'
+      ))).toBe(true);
+      expect(portEdges.some((e) => e.target === loopData?.id)).toBe(false);
+
+      process.env.CODEGRAPH_VERILOG_DEFINES = 'LOOPBACK';
+      const definedResult = extractFromSource('rtl/top.v', code);
+      const definedInstance = definedResult.nodes.find((n) => n.kind === 'variable' && n.name === 'u_child');
+      expect(definedInstance?.signature).toContain('.din (loop_data)');
+      expect(definedInstance?.signature).not.toContain('normal_data');
+    } finally {
+      if (previousDefines === undefined) delete process.env.CODEGRAPH_VERILOG_DEFINES;
+      else process.env.CODEGRAPH_VERILOG_DEFINES = previousDefines;
+    }
+  });
+
+  it('should extract SystemVerilog packages, typedefs, interfaces, classes, and imports', () => {
+    const code = `
+package bus_pkg;
+  import common_pkg::*;
+
+  typedef enum logic [1:0] {
+    ST_IDLE,
+    ST_BUSY
+  } state_e;
+
+  typedef struct packed {
+    logic [7:0] data;
+    logic       valid;
+  } beat_t;
+
+  class Driver;
+    beat_t last_beat;
+
+    function new();
+    endfunction
+
+    task send(input beat_t beat);
+    endtask
+  endclass
+endpackage
+
+interface bus_if(input logic clk);
+  logic valid;
+  modport master(output valid);
+endinterface
+
+module dut(bus_if.master bus);
+endmodule
+`;
+    const result = extractFromSource('rtl/bus.sv', code);
+
+    expect(result.nodes.find((n) => n.kind === 'namespace' && n.name === 'bus_pkg')).toBeDefined();
+    expect(result.nodes.find((n) => n.kind === 'interface' && n.name === 'bus_if')).toBeDefined();
+    expect(result.nodes.find((n) => n.kind === 'class' && n.name === 'Driver')).toBeDefined();
+    expect(result.nodes.find((n) => n.kind === 'enum' && n.name === 'state_e')).toBeDefined();
+    expect(result.nodes.find((n) => n.kind === 'struct' && n.name === 'beat_t')).toBeDefined();
+    expect(result.nodes.find((n) => n.kind === 'field' && n.name === 'last_beat')).toBeDefined();
+    expect(result.nodes.find((n) => n.kind === 'method' && n.name === 'send')).toBeDefined();
+    expect(result.nodes.find((n) => n.kind === 'variable' && n.name === 'valid')).toBeDefined();
+
+    const members = result.nodes.filter((n) => n.kind === 'enum_member').map((n) => n.name);
+    expect(members).toEqual(expect.arrayContaining(['ST_IDLE', 'ST_BUSY']));
+
+    const imports = result.nodes.filter((n) => n.kind === 'import').map((n) => n.name);
+    expect(imports).toContain('common_pkg::*');
   });
 });
 

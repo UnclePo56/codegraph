@@ -19,6 +19,7 @@ import { getParser, detectLanguage, isLanguageSupported, isFileLevelOnlyLanguage
 import { generateNodeId, getNodeText, getChildByField, getPrecedingDocstring } from './tree-sitter-helpers';
 import type { LanguageExtractor, ExtractorContext } from './tree-sitter-types';
 import { EXTRACTORS } from './languages';
+import { preprocessVerilogSource } from './languages/verilog';
 import { LiquidExtractor } from './liquid-extractor';
 import { SvelteExtractor } from './svelte-extractor';
 import { DfmExtractor } from './dfm-extractor';
@@ -191,6 +192,9 @@ export class TreeSitterExtractor {
     }
 
     try {
+      if (this.language === 'verilog' || this.language === 'systemverilog') {
+        this.source = preprocessVerilogSource(this.source);
+      }
       this.tree = parser.parse(this.source) ?? null;
       if (!this.tree) {
         throw new Error('Parser returned null tree');
@@ -566,6 +570,7 @@ export class TreeSitterExtractor {
       visitNode: (node) => self.visitNode(node),
       visitFunctionBody: (body, functionId) => self.visitFunctionBody(body, functionId),
       addUnresolvedReference: (ref) => self.unresolvedReferences.push(ref),
+      addEdge: (edge) => self.edges.push(edge),
       pushScope: (nodeId) => self.nodeStack.push(nodeId),
       popScope: () => self.nodeStack.pop(),
       get filePath() { return self.filePath; },

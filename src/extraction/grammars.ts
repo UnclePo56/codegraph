@@ -38,6 +38,8 @@ const WASM_GRAMMAR_FILES: Record<GrammarLanguage, string> = {
   lua: 'tree-sitter-lua.wasm',
   luau: 'tree-sitter-luau.wasm',
   objc: 'tree-sitter-objc.wasm',
+  verilog: 'tree-sitter-verilog.wasm',
+  systemverilog: 'tree-sitter-verilog.wasm',
 };
 
 /**
@@ -95,6 +97,10 @@ export const EXTENSION_MAP: Record<string, Language> = {
   '.luau': 'luau',
   '.m': 'objc',
   '.mm': 'objc',
+  '.v': 'verilog',
+  '.vh': 'verilog',
+  '.sv': 'systemverilog',
+  '.svh': 'systemverilog',
   // XML: file-level tracking; the MyBatis extractor matches `<mapper namespace="...">`
   // shape and emits SQL-statement nodes (other XML returns empty).
   '.xml': 'xml',
@@ -134,6 +140,7 @@ export function isPlayRoutesFile(filePath: string): boolean {
  */
 const parserCache = new Map<Language, Parser>();
 const languageCache = new Map<Language, WasmLanguage>();
+const wasmLanguageCache = new Map<string, WasmLanguage>();
 const unavailableGrammarErrors = new Map<Language, string>();
 
 let parserInitialized = false;
@@ -179,10 +186,21 @@ export async function loadGrammarsForLanguages(languages: Language[]): Promise<v
       // ABI-13 build that corrupts the shared WASM heap under web-tree-sitter
       // 0.25 (drops nested calls/imports on every file after the first); we
       // vendor the upstream ABI-15 wasm instead.
-      const wasmPath = (lang === 'pascal' || lang === 'scala' || lang === 'lua' || lang === 'luau')
+      const wasmPath = (
+        lang === 'pascal' ||
+        lang === 'scala' ||
+        lang === 'lua' ||
+        lang === 'luau' ||
+        lang === 'verilog' ||
+        lang === 'systemverilog'
+      )
         ? path.join(__dirname, 'wasm', wasmFile)
         : require.resolve(`tree-sitter-wasms/out/${wasmFile}`);
-      const language = await WasmLanguage.load(wasmPath);
+      let language = wasmLanguageCache.get(wasmPath);
+      if (!language) {
+        language = await WasmLanguage.load(wasmPath);
+        wasmLanguageCache.set(wasmPath, language);
+      }
       languageCache.set(lang, language);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -378,6 +396,8 @@ export function getLanguageDisplayName(language: Language): string {
     lua: 'Lua',
     luau: 'Luau',
     objc: 'Objective-C',
+    verilog: 'Verilog',
+    systemverilog: 'SystemVerilog',
     yaml: 'YAML',
     twig: 'Twig',
     xml: 'XML',

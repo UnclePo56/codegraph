@@ -56,6 +56,8 @@ export type EdgeKind =
   | 'type_of'         // Variable/parameter has type
   | 'returns'         // Function returns type
   | 'instantiates'    // Creates instance of class
+  | 'connects'        // HDL module-level connection/instance graph edge
+  | 'port_connection' // HDL instance formal port connected to an actual signal
   | 'overrides'       // Method overrides parent method
   | 'decorates';      // Decorator applied to symbol
 
@@ -88,6 +90,8 @@ export const LANGUAGES = [
   'lua',
   'luau',
   'objc',
+  'verilog',
+  'systemverilog',
   'yaml',
   'twig',
   'xml',
