@@ -1,4 +1,5 @@
 import { defineConfig } from 'vitest/config';
+import { WASM_RUNTIME_FLAGS } from './src/extraction/wasm-runtime-flags';
 
 export default defineConfig({
   test: {
@@ -19,6 +20,14 @@ export default defineConfig({
      * there, so the variable is a no-op.
      */
     env: { CODEGRAPH_ALLOW_UNSAFE_NODE: '1' },
+    poolOptions: {
+      forks: {
+        execArgv: [...WASM_RUNTIME_FLAGS],
+      },
+      threads: {
+        execArgv: [...WASM_RUNTIME_FLAGS],
+      },
+    },
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'html'],

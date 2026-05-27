@@ -8,6 +8,7 @@
 
 import { Node as SyntaxNode } from 'web-tree-sitter';
 import {
+  Edge,
   Node,
   NodeKind,
   UnresolvedReference,
@@ -56,6 +57,8 @@ export interface ExtractorContext {
   visitFunctionBody(body: SyntaxNode, functionId: string): void;
   /** Add an unresolved reference */
   addUnresolvedReference(ref: UnresolvedReference): void;
+  /** Add a resolved edge produced directly by a language extractor */
+  addEdge(edge: Edge): void;
   /** Push a node ID onto the scope stack (for containment/qualified name building) */
   pushScope(nodeId: string): void;
   /** Pop the last node ID from the scope stack */

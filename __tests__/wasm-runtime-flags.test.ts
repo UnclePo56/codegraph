@@ -19,6 +19,16 @@ import {
   processHasWasmRuntimeFlags,
   buildRelaunchArgv,
 } from '../src/extraction/wasm-runtime-flags';
+import vitestConfig from '../vitest.config';
+
+type VitestWorkerFlagConfig = {
+  test?: {
+    poolOptions?: {
+      forks?: { execArgv?: string[] };
+      threads?: { execArgv?: string[] };
+    };
+  };
+};
 
 describe('WASM_RUNTIME_FLAGS', () => {
   it('pins --liftoff-only (the only flag shown to stop the turboshaft Zone OOM)', () => {
@@ -83,5 +93,17 @@ describe('buildRelaunchArgv', () => {
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it('passes the WASM flags to Vitest workers', () => {
+    // Vitest filters process.execArgv before spawning workers, so parent-level
+    // flags are not enough to protect tree-sitter WASM compilation in tests.
+    const config = vitestConfig as VitestWorkerFlagConfig;
+    expect(config.test?.poolOptions?.forks?.execArgv).toEqual(
+      expect.arrayContaining([...WASM_RUNTIME_FLAGS])
+    );
+    expect(config.test?.poolOptions?.threads?.execArgv).toEqual(
+      expect.arrayContaining([...WASM_RUNTIME_FLAGS])
+    );
   });
 });

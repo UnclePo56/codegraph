@@ -18,6 +18,8 @@ Language support is automatic from the file extension — there's nothing to con
 | Ruby | `.rb` | Full support |
 | C | `.c`, `.h` | Full support |
 | C++ | `.cpp`, `.hpp`, `.cc` | Full support |
+| Verilog | `.v`, `.vh` | Full support (modules, ports/signals as variables, parameters, nets, instances, functions, tasks, module-level `connects` graph, instance `port_connection` edges, active macro branch filtering via `CODEGRAPH_VERILOG_DEFINES`/`CODEGRAPH_HDL_DEFINES`) |
+| SystemVerilog | `.sv`, `.svh` | Full support (packages, interfaces, classes, typedefs, enums, structs, methods, ports/signals as variables, module/interface instances, module-level `connects` graph, instance `port_connection` edges, active macro branch filtering via `CODEGRAPH_VERILOG_DEFINES`/`CODEGRAPH_HDL_DEFINES`) |
 | Swift | `.swift` | Full support |
 | Kotlin | `.kt`, `.kts` | Full support |
 | Scala | `.scala`, `.sc` | Full support (classes, traits, methods, type aliases, Scala 3 enums) |
