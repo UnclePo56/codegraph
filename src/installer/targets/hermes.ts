@@ -24,7 +24,7 @@ import {
   Location,
   WriteResult,
 } from './types';
-import { atomicWriteFileSync } from './shared';
+import { atomicWriteFileSync, getMcpServerInvocation } from './shared';
 
 type LineRange = { start: number; end: number };
 
@@ -249,13 +249,19 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+function yamlScalar(value: string): string {
+  return /^[A-Za-z0-9_./-]+$/.test(value)
+    ? value
+    : `'${value.replace(/'/g, "''")}'`;
+}
+
 function renderCodeGraphMcpChild(): string[] {
+  const invocation = getMcpServerInvocation();
   return [
     '  codegraph:',
-    '    command: codegraph',
+    `    command: ${yamlScalar(invocation.command)}`,
     '    args:',
-    '      - serve',
-    '      - --mcp',
+    ...invocation.args.map((arg) => `      - ${yamlScalar(arg)}`),
     '    timeout: 120',
     '    connect_timeout: 60',
     '    enabled: true',

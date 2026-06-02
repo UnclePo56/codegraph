@@ -24,11 +24,31 @@ import { CodeGraph } from '../src';
 
 const BIN = path.resolve(__dirname, '../dist/bin/codegraph.js');
 
+function cleanupTempDir(dir: string): void {
+  if (fs.existsSync(dir)) {
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+}
+
+async function stopChild(child: ChildProcessWithoutNullStreams | null): Promise<void> {
+  if (!child || child.killed || child.exitCode !== null || child.signalCode !== null) return;
+
+  await new Promise<void>((resolve) => {
+    const timeout = setTimeout(resolve, 5000);
+    child.once('close', () => {
+      clearTimeout(timeout);
+      resolve();
+    });
+    child.kill('SIGKILL');
+  });
+}
+
 function spawnServer(cwd: string): ChildProcessWithoutNullStreams {
   // --no-watch keeps the test deterministic and avoids watcher startup noise.
   return spawn(process.execPath, [BIN, 'serve', '--mcp', '--no-watch'], {
     cwd,
     stdio: ['pipe', 'pipe', 'pipe'],
+    env: { ...process.env, CODEGRAPH_NO_DAEMON: '1' },
   }) as ChildProcessWithoutNullStreams;
 }
 
@@ -84,13 +104,11 @@ describe('MCP project resolution via roots/list (issue #196)', () => {
     projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-mcp-proj-'));
   });
 
-  afterEach(() => {
-    if (child && !child.killed) {
-      child.kill('SIGKILL');
-      child = null;
-    }
-    fs.rmSync(cwdDir, { recursive: true, force: true });
-    fs.rmSync(projectDir, { recursive: true, force: true });
+  afterEach(async () => {
+    await stopChild(child);
+    child = null;
+    cleanupTempDir(cwdDir);
+    cleanupTempDir(projectDir);
   });
 
   it('resolves the project from the client roots/list when no rootUri is sent', async () => {

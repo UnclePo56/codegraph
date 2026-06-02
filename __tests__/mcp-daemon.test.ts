@@ -48,6 +48,22 @@ interface SpawnedServer {
   stderr: string[];
 }
 
+async function cleanupTempDir(dir: string): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    try {
+      if (fs.existsSync(dir)) {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+      return;
+    } catch (error) {
+      if (attempt === 99) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+}
+
 function spawnServer(cwd: string, env: NodeJS.ProcessEnv = {}): SpawnedServer {
   const child = spawn(process.execPath, [BIN, 'serve', '--mcp'], {
     cwd,
@@ -158,6 +174,19 @@ function killTree(...procs: ChildProcessWithoutNullStreams[]): void {
   }
 }
 
+async function stopChild(child: ChildProcessWithoutNullStreams): Promise<void> {
+  if (child.killed || child.exitCode !== null || child.signalCode !== null) return;
+
+  await new Promise<void>((resolve) => {
+    const timeout = setTimeout(resolve, 5000);
+    child.once('close', () => {
+      clearTimeout(timeout);
+      resolve();
+    });
+    try { child.kill('SIGKILL'); } catch { clearTimeout(timeout); resolve(); }
+  });
+}
+
 async function waitProcessExit(pid: number, timeoutMs: number): Promise<boolean> {
   return waitFor(() => !isAlive(pid), timeoutMs).then(() => true).catch(() => false);
 }
@@ -175,7 +204,7 @@ describe('Shared MCP daemon (issue #411)', () => {
   });
 
   afterEach(async () => {
-    killTree(...servers.map((s) => s.child));
+    await Promise.all(servers.map((server) => stopChild(server.child)));
     // The daemon is detached (not a tracked child) — reap it explicitly via the
     // pid it recorded, so a test can't leak a background daemon. Guard against
     // our own pid: the version-mismatch test plants `pid: process.pid` in the
@@ -183,10 +212,11 @@ describe('Shared MCP daemon (issue #411)', () => {
     const daemonPid = readLockPid(realRoot);
     if (daemonPid && daemonPid !== process.pid && isAlive(daemonPid)) {
       try { process.kill(daemonPid, 'SIGKILL'); } catch { /* race */ }
+      await waitProcessExit(daemonPid, 5000);
     }
     await new Promise((r) => setTimeout(r, 50));
     servers.length = 0;
-    fs.rmSync(tempDir, { recursive: true, force: true });
+    await cleanupTempDir(tempDir);
   });
 
   it('two invocations share ONE detached daemon; both attach as proxies', async () => {

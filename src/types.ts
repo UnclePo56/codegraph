@@ -58,6 +58,7 @@ export type EdgeKind =
   | 'instantiates'    // Creates instance of class
   | 'connects'        // HDL module-level connection/instance graph edge
   | 'port_connection' // HDL instance formal port connected to an actual signal
+  | 'signal_dependency' // HDL signal/data-flow dependency edge
   | 'overrides'       // Method overrides parent method
   | 'decorates';      // Decorator applied to symbol
 
@@ -165,6 +166,9 @@ export interface Node {
 
   /** Generic type parameters */
   typeParameters?: string[];
+
+  /** Additional extractor-specific structured metadata */
+  metadata?: Record<string, unknown>;
 
   /** When the node was last updated */
   updatedAt: number;

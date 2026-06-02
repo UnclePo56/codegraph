@@ -12,16 +12,52 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 /**
+ * Resolve the MCP launcher command/args that agent configs should use.
+ *
+ * On bundled Windows installs we prefer a PowerShell wrapper script that starts
+ * the bundled runtime with `-WindowStyle Hidden`, which avoids the visible
+ * console flash GUI MCP hosts cause when they spawn `codegraph.cmd` directly.
+ *
+ * Outside the bundle layout (source checkouts, ad hoc dev runs), the wrapper
+ * won't exist, so we fall back to the normal `codegraph serve --mcp` command.
+ */
+export function getMcpServerInvocation(): { command: string; args: string[] } {
+  if (process.platform === 'win32') {
+    const bundleRoot = path.dirname(process.execPath);
+    const hiddenLauncher = path.join(bundleRoot, 'bin', 'codegraph-mcp.ps1');
+    if (fs.existsSync(hiddenLauncher)) {
+      return {
+        command: 'powershell.exe',
+        args: [
+          '-NoLogo',
+          '-NoProfile',
+          '-NonInteractive',
+          '-ExecutionPolicy',
+          'Bypass',
+          '-WindowStyle',
+          'Hidden',
+          '-File',
+          hiddenLauncher,
+          'serve',
+          '--mcp',
+        ],
+      };
+    }
+  }
+
+  return {
+    command: 'codegraph',
+    args: ['serve', '--mcp'],
+  };
+}
+
+/**
  * The MCP-server config block codegraph injects. Same shape across
  * all JSON-shaped agent configs (Claude, Cursor, opencode), only the
  * surrounding wrapper differs. Codex (TOML) builds its own block.
  */
 export function getMcpServerConfig(): { type: string; command: string; args: string[] } {
-  return {
-    type: 'stdio',
-    command: 'codegraph',
-    args: ['serve', '--mcp'],
-  };
+  return { type: 'stdio', ...getMcpServerInvocation() };
 }
 
 /**

@@ -65,6 +65,7 @@ import {
   WriteResult,
 } from './types';
 import {
+  getMcpServerInvocation,
   jsonDeepEqual,
   readJsonFile,
   writeJsonFile,
@@ -140,6 +141,9 @@ function resolveCodegraphCommand(): string {
  * header.
  */
 function buildAntigravityEntry(): { command: string; args: string[] } {
+  if (process.platform === 'win32') {
+    return getMcpServerInvocation();
+  }
   return {
     command: resolveCodegraphCommand(),
     args: ['serve', '--mcp'],

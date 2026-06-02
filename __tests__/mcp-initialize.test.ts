@@ -19,6 +19,25 @@ import { CodeGraph } from '../src';
 
 const BIN = path.resolve(__dirname, '../dist/bin/codegraph.js');
 
+function cleanupTempDir(dir: string): void {
+  if (fs.existsSync(dir)) {
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+}
+
+async function stopChild(child: ChildProcessWithoutNullStreams | null): Promise<void> {
+  if (!child || child.killed || child.exitCode !== null || child.signalCode !== null) return;
+
+  await new Promise<void>((resolve) => {
+    const timeout = setTimeout(resolve, 5000);
+    child.once('close', () => {
+      clearTimeout(timeout);
+      resolve();
+    });
+    child.kill('SIGKILL');
+  });
+}
+
 function spawnServer(cwd: string): ChildProcessWithoutNullStreams {
   return spawn(process.execPath, [BIN, 'serve', '--mcp'], {
     cwd,
@@ -107,12 +126,10 @@ describe('MCP initialize handshake (issue #172)', () => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-mcp-init-'));
   });
 
-  afterEach(() => {
-    if (child && !child.killed) {
-      child.kill('SIGKILL');
-      child = null;
-    }
-    fs.rmSync(tempDir, { recursive: true, force: true });
+  afterEach(async () => {
+    await stopChild(child);
+    child = null;
+    cleanupTempDir(tempDir);
   });
 
   it('responds to initialize quickly when no .codegraph exists in cwd', async () => {

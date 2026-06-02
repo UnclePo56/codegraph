@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     is_abstract INTEGER DEFAULT 0,
     decorators TEXT, -- JSON array
     type_parameters TEXT, -- JSON array
+    metadata TEXT, -- JSON object
     updated_at INTEGER NOT NULL
 );
 

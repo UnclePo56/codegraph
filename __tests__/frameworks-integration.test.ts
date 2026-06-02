@@ -5,6 +5,12 @@ import * as os from 'os';
 import { CodeGraph } from '../src';
 import { initGrammars, loadAllGrammars } from '../src/extraction/grammars';
 
+function cleanupTempDir(dir: string | undefined): void {
+  if (dir && fs.existsSync(dir)) {
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+}
+
 beforeAll(async () => {
   await initGrammars();
   await loadAllGrammars();
@@ -13,7 +19,7 @@ beforeAll(async () => {
 describe('Django end-to-end framework extraction', () => {
   let tmpDir: string | undefined;
   afterEach(() => {
-    if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
+    cleanupTempDir(tmpDir);
     tmpDir = undefined;
   });
 
@@ -61,7 +67,7 @@ describe('Django end-to-end framework extraction', () => {
 describe('Flask end-to-end framework extraction', () => {
   let tmpDir: string | undefined;
   afterEach(() => {
-    if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
+    cleanupTempDir(tmpDir);
     tmpDir = undefined;
   });
 
@@ -108,7 +114,7 @@ describe('Flask end-to-end framework extraction', () => {
 describe('Flutter end-to-end — setState→build synthesis', () => {
   let tmpDir: string | undefined;
   afterEach(() => {
-    if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
+    cleanupTempDir(tmpDir);
     tmpDir = undefined;
   });
 
@@ -157,7 +163,7 @@ describe('Flutter end-to-end — setState→build synthesis', () => {
 describe('C++ end-to-end — virtual override synthesis', () => {
   let tmpDir: string | undefined;
   afterEach(() => {
-    if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
+    cleanupTempDir(tmpDir);
     tmpDir = undefined;
   });
 
@@ -306,7 +312,7 @@ describe('C++ end-to-end — virtual override synthesis', () => {
 describe('Java end-to-end — field-injected bean trace (issue #389)', () => {
   let tmpDir: string | undefined;
   afterEach(() => {
-    if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
+    cleanupTempDir(tmpDir);
     tmpDir = undefined;
   });
 
@@ -610,7 +616,7 @@ describe('Java end-to-end — field-injected bean trace (issue #389)', () => {
 describe('JVM FQN imports — end-to-end', () => {
   let tmpDir: string | undefined;
   afterEach(() => {
-    if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
+    cleanupTempDir(tmpDir);
     tmpDir = undefined;
   });
 
@@ -666,6 +672,7 @@ describe('JVM FQN imports — end-to-end', () => {
 
     const edge = cg.getIncomingEdges(util!.id).find((e) => e.kind === 'imports');
     expect(edge, 'imports edge should reach the top-level function by FQN').toBeDefined();
+    cg.close();
   });
 
   it('resolves cross-language: Kotlin importing a Java class', async () => {
@@ -687,6 +694,7 @@ describe('JVM FQN imports — end-to-end', () => {
 
     const edge = cg.getIncomingEdges(javaBar!.id).find((e) => e.kind === 'imports');
     expect(edge, 'Kotlin caller should resolve its import to the Java class').toBeDefined();
+    cg.close();
   });
 
   it('disambiguates a class-name collision across packages', async () => {
@@ -732,13 +740,14 @@ describe('JVM FQN imports — end-to-end', () => {
       edges.map((e) => cg.getNode(e.source)?.filePath).filter(Boolean);
     expect(sourceFiles(alphaIncoming).some((p) => p?.includes('CallerA.kt'))).toBe(true);
     expect(sourceFiles(betaIncoming).some((p) => p?.includes('CallerB.kt'))).toBe(true);
+    cg.close();
   });
 });
 
 describe('Java anonymous-class override synthesis — end-to-end', () => {
   let tmpDir: string | undefined;
   afterEach(() => {
-    if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
+    cleanupTempDir(tmpDir);
     tmpDir = undefined;
   });
 

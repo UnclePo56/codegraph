@@ -21,6 +21,7 @@ import {
 } from '../sync/worktree';
 import type { PendingFile } from '../sync';
 import type { Node, Edge, SearchResult, Subgraph, TaskContext, NodeKind } from '../types';
+import type { Dirent } from 'fs';
 import { createHash } from 'crypto';
 import {
   constants as fsConstants,
@@ -30,6 +31,7 @@ import {
   openSync,
   readFileSync,
   statSync,
+  readdirSync,
   writeSync,
 } from 'fs';
 import { clamp, validatePathWithinRoot, validateProjectPath } from '../utils';
@@ -81,6 +83,58 @@ function lastQualifierPart(symbol: string): string {
   const parts = symbol.split(/::|[./]/).filter((p) => p.length > 0);
   return parts[parts.length - 1] ?? symbol;
 }
+
+function metadataRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function hdlMetadata(node: Node): Record<string, unknown> {
+  return metadataRecord(metadataRecord(node.metadata).hdl);
+}
+
+function isHdlNode(node: Node): boolean {
+  return node.language === 'verilog' || node.language === 'systemverilog';
+}
+
+function hdlRole(node: Node): string | undefined {
+  const role = hdlMetadata(node).role;
+  return typeof role === 'string' ? role : undefined;
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+type HdlFlowHopKind =
+  | 'signal_dependency'
+  | 'instance_input'
+  | 'instance_output'
+  | 'parent_input'
+  | 'parent_output';
+
+type HdlFlowHop = {
+  node: Node;
+  note: string;
+  kind: HdlFlowHopKind;
+  line?: number;
+  expression?: string;
+};
+
+type HdlFlowGraphEdge = {
+  source: Node;
+  target: Node;
+  note: string;
+  kind: HdlFlowHopKind;
+  line?: number;
+  expression?: string;
+};
+
+type HdlFlowGraph = {
+  nodes: Node[];
+  edges: HdlFlowGraphEdge[];
+};
 
 /**
  * Calculate the recommended number of codegraph_explore calls based on project size.
@@ -2951,8 +3005,9 @@ export class ToolHandler {
       }
     }
 
+    const hdlDetails = this.formatHdlDetails(cg, match.node);
     const trail = this.formatTrail(cg, match.node);
-    const formatted = this.formatNodeDetails(match.node, code, outline) + trail + match.note;
+    const formatted = this.formatNodeDetails(match.node, code, outline) + hdlDetails + trail + match.note;
     return this.textResult(this.truncateOutput(formatted));
   }
 
@@ -3535,6 +3590,594 @@ export class ToolHandler {
     return lines.join('\n');
   }
 
+  private formatHdlDetails(cg: CodeGraph, node: Node): string {
+    if (!isHdlNode(node)) return '';
+
+    if (node.kind === 'module' || node.kind === 'interface') {
+      return this.formatHdlModuleDetails(cg, node);
+    }
+
+    if (node.kind === 'variable' || node.kind === 'field' || node.kind === 'parameter') {
+      return this.formatHdlSignalDetails(cg, node);
+    }
+
+    return '';
+  }
+
+  private formatHdlModuleDetails(cg: CodeGraph, node: Node): string {
+    const meta = hdlMetadata(node);
+    const parents = cg.getIncomingEdges(node.id)
+      .filter((edge) => edge.kind === 'connects')
+      .map((edge) => cg.getNode(edge.source))
+      .filter((parent): parent is Node => Boolean(parent));
+    const children = cg.getOutgoingEdges(node.id)
+      .filter((edge) => edge.kind === 'connects')
+      .map((edge) => cg.getNode(edge.target))
+      .filter((child): child is Node => Boolean(child));
+    const instances = this.getHdlInstances(cg, node);
+    const root = this.findHdlRoot(cg);
+
+    const lines: string[] = ['', '### HDL Module Graph'];
+    lines.push(`**Clocks:** ${this.formatHdlEndpointList(meta.clocks)}`);
+    lines.push(`**Resets:** ${this.formatHdlEndpointList(meta.resets)}`);
+    lines.push(`**Parents:** ${parents.length > 0 ? parents.map((p) => `${p.name} (${p.filePath}:${p.startLine})`).join(', ') : 'none indexed'}`);
+    lines.push(`**Children:** ${children.length > 0 ? children.map((c) => `${c.name} (${c.filePath}:${c.startLine})`).join(', ') : 'none indexed'}`);
+
+    if (instances.length > 0) {
+      lines.push('', '**Direct Instances:**');
+      for (const inst of instances.slice(0, 30)) {
+        const instMeta = hdlMetadata(inst);
+        const targetModule = stringValue(instMeta.targetModule) ?? 'unknown';
+        const params = this.formatHdlAssociations(instMeta.parameterOverrides);
+        const paramText = params ? ` #(${params})` : '';
+        lines.push(`- ${inst.name}: ${targetModule}${paramText} (${inst.filePath}:${inst.startLine})`);
+      }
+      if (instances.length > 30) {
+        lines.push(`- +${instances.length - 30} more instances`);
+      }
+    }
+
+    if (root) {
+      lines.push('', `**Resolved Root:** ${root.node.name} (${root.reason})`);
+      lines.push('**Instance Tree:**');
+      lines.push(...this.buildHdlModuleTree(cg, root.node, node.id, 0, new Set<string>(), 8));
+    }
+
+    return lines.join('\n');
+  }
+
+  private formatHdlSignalDetails(cg: CodeGraph, node: Node): string {
+    const meta = hdlMetadata(node);
+    const role = hdlRole(node);
+
+    if (role === 'instance') {
+      const targetModule = stringValue(meta.targetModule) ?? 'unknown';
+      const params = this.formatHdlAssociations(meta.parameterOverrides);
+      const ports = this.formatHdlAssociations(meta.portConnections);
+      const lines = ['', '### HDL Instance'];
+      lines.push(`**Target module:** ${targetModule}`);
+      if (params) lines.push(`**Parameter overrides:** ${params}`);
+      if (ports) lines.push(`**Port map:** ${ports}`);
+      return lines.join('\n');
+    }
+
+    const upstream = this.collectHdlFlowGraph(cg, node, 'upstream', 8, 200);
+    const downstream = this.collectHdlFlowGraph(cg, node, 'downstream', 8, 200);
+    const combinedNodes = new Map<string, Node>();
+    for (const graphNode of [...upstream.nodes, ...downstream.nodes]) {
+      combinedNodes.set(graphNode.id, graphNode);
+    }
+    const traversedModules = [...combinedNodes.values()]
+      .map((graphNode) => this.getContainingHdlModule(cg, graphNode))
+      .filter((module): module is Node => Boolean(module))
+      .filter((module, index, modules) => modules.findIndex((item) => item.id === module.id) === index);
+    const origins = this.findHdlLeafNodes(upstream, 'upstream');
+    const sinks = this.findHdlLeafNodes(downstream, 'downstream');
+    const outputSinks = sinks.filter((sink) => {
+      const sinkMeta = hdlMetadata(sink);
+      const direction = stringValue(sinkMeta.direction);
+      return hdlRole(sink) === 'port' && (direction === 'output' || direction === 'inout');
+    });
+    const finalOutputs = outputSinks.length > 0 ? outputSinks : sinks;
+    const derivations = this.formatHdlDerivations([...upstream.edges, ...downstream.edges]);
+
+    const lines: string[] = ['', '### HDL Signal Flow'];
+    lines.push(`**Qualified node:** \`${node.qualifiedName}\``);
+    lines.push(`**Attributes:** ${this.formatHdlSignalAttributes(meta)}`);
+    lines.push(`**Origin stimuli:** ${this.formatHdlSignalList(origins.length > 0 ? origins : [node])}`);
+    lines.push(`**Traversed modules:** ${traversedModules.length > 0 ? traversedModules.map((module) => `${module.name} (${module.filePath}:${module.startLine})`).join(', ') : 'none indexed'}`);
+    lines.push(`**Final output ports:** ${this.formatHdlSignalList(finalOutputs.length > 0 ? finalOutputs : [node])}`);
+    if (derivations.length > 0) {
+      lines.push('**Derivations:**');
+      lines.push(...derivations);
+    }
+    lines.push('**Upstream trace:**');
+    this.appendHdlSignalTree(cg, node, 'upstream', lines, 0, new Set<string>(), 5, '');
+    lines.push('**Downstream trace:**');
+    this.appendHdlSignalTree(cg, node, 'downstream', lines, 0, new Set<string>(), 5, '');
+    return lines.join('\n');
+  }
+
+  private formatHdlEndpointList(value: unknown): string {
+    if (!Array.isArray(value) || value.length === 0) return 'none indexed';
+    return value.map((item) => {
+      const endpoint = metadataRecord(item);
+      const name = String(endpoint.name ?? 'unknown');
+      const dir = endpoint.direction ? `/${String(endpoint.direction)}` : '';
+      const polarity = endpoint.polarity ? `/${String(endpoint.polarity)}` : '';
+      return `${name}${dir}${polarity}`;
+    }).join(', ');
+  }
+
+  private formatHdlAssociations(value: unknown): string {
+    if (!Array.isArray(value) || value.length === 0) return '';
+    return value
+      .map((item) => {
+        const assoc = metadataRecord(item);
+        const formal = stringValue(assoc.formal);
+        const actual = assoc.actual === undefined ? undefined : String(assoc.actual);
+        return formal ? `.${formal}(${actual ?? ''})` : '';
+      })
+      .filter((item) => item.length > 0)
+      .join(', ');
+  }
+
+  private getHdlModules(cg: CodeGraph): Node[] {
+    return cg.getNodesByKind('module').filter(isHdlNode);
+  }
+
+  private findHdlModuleByName(cg: CodeGraph, name: string): Node | undefined {
+    return this.getHdlModules(cg).find((module) => module.name === name);
+  }
+
+  private getHdlPorts(cg: CodeGraph, module: Node): Node[] {
+    return cg.getChildren(module.id)
+      .filter((child) => hdlRole(child) === 'port')
+      .sort((a, b) => a.startLine - b.startLine);
+  }
+
+  private getHdlInstances(cg: CodeGraph, module: Node): Node[] {
+    return cg.getChildren(module.id)
+      .filter((child) => hdlRole(child) === 'instance')
+      .sort((a, b) => a.startLine - b.startLine);
+  }
+
+  private findHdlRoot(cg: CodeGraph): { node: Node; reason: string } | null {
+    const modules = this.getHdlModules(cg);
+    if (modules.length === 0) return null;
+
+    const exactTop = modules.find((module) => module.name === 'top')
+      ?? modules.find((module) => module.name.toLowerCase() === 'top');
+    if (exactTop) {
+      return { node: exactTop, reason: 'module named top' };
+    }
+
+    const roots = modules.filter((module) => (
+      !cg.getIncomingEdges(module.id).some((edge) => edge.kind === 'connects')
+    ));
+    const candidates = roots.length > 0 ? roots : modules;
+    const constraintPins = this.readConstraintPins(cg.getProjectRoot());
+    if (constraintPins.size > 0) {
+      const scored = candidates
+        .map((module) => ({
+          module,
+          score: this.getHdlPorts(cg, module)
+            .filter((port) => constraintPins.has(port.name))
+            .length,
+        }))
+        .sort((a, b) => b.score - a.score);
+      const best = scored[0];
+      if (best && best.score > 0) {
+        return {
+          node: best.module,
+          reason: `selected by SDC/XDC pin overlap (${best.score} matching ports)`,
+        };
+      }
+    }
+
+    return {
+      node: candidates[0]!,
+      reason: roots.length > 0 ? 'module has no indexed parent' : 'first indexed HDL module',
+    };
+  }
+
+  private readConstraintPins(projectRoot: string): Set<string> {
+    const pins = new Set<string>();
+    const stack = [projectRoot];
+    let filesRead = 0;
+
+    while (stack.length > 0 && filesRead < 50) {
+      const dir = stack.pop()!;
+      let entries: Dirent[];
+      try {
+        entries = readdirSync(dir, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+
+      for (const entry of entries) {
+        const fullPath = join(dir, entry.name);
+        if (entry.isDirectory()) {
+          if (!['.git', '.codegraph', 'node_modules', 'dist', 'build', 'target', '.next'].includes(entry.name)) {
+            stack.push(fullPath);
+          }
+          continue;
+        }
+
+        if (!/\.(sdc|xdc)$/i.test(entry.name)) continue;
+        try {
+          const stat = lstatSync(fullPath);
+          if (stat.size > 2_000_000) continue;
+          filesRead++;
+          this.collectConstraintPins(readFileSync(fullPath, 'utf8'), pins);
+        } catch {
+          // Ignore unreadable constraint files; root detection still has graph fallbacks.
+        }
+      }
+    }
+
+    return pins;
+  }
+
+  private collectConstraintPins(text: string, pins: Set<string>): void {
+    const re = /get_(?:ports|pins)\s+(?:\{([^}]*)\}|([^\]\s;]+))/g;
+    let match: RegExpExecArray | null;
+    while ((match = re.exec(text)) !== null) {
+      const raw = match[1] ?? match[2] ?? '';
+      for (const token of raw.split(/\s+/)) {
+        const cleaned = token
+          .replace(/[{}'"]/g, '')
+          .replace(/\[[^\]]*\]/g, '')
+          .split(/[/.]/)
+          .filter(Boolean)
+          .at(-1);
+        if (cleaned && /^[A-Za-z_][A-Za-z0-9_$]*$/.test(cleaned) && !cleaned.includes('*')) {
+          pins.add(cleaned);
+        }
+      }
+    }
+  }
+
+  private buildHdlModuleTree(
+    cg: CodeGraph,
+    module: Node,
+    focusId: string,
+    depth: number,
+    path: Set<string>,
+    maxDepth: number
+  ): string[] {
+    const indent = '  '.repeat(depth);
+    const focus = module.id === focusId ? ' [focus]' : '';
+    const endpoint = this.formatHdlTreeClockReset(module);
+    const lines = [`${indent}- ${module.name}${focus} (${module.filePath}:${module.startLine})${endpoint}`];
+    if (depth >= maxDepth) {
+      lines.push(`${indent}  - ... max HDL tree depth reached`);
+      return lines;
+    }
+
+    const nextPath = new Set(path);
+    nextPath.add(module.id);
+    for (const inst of this.getHdlInstances(cg, module)) {
+      const instMeta = hdlMetadata(inst);
+      const targetName = stringValue(instMeta.targetModule) ?? 'unknown';
+      const params = this.formatHdlAssociations(instMeta.parameterOverrides);
+      const paramText = params ? ` #(${params})` : '';
+      lines.push(`${indent}  - ${inst.name}: ${targetName}${paramText} (${inst.filePath}:${inst.startLine})`);
+
+      const targetModule = this.findHdlModuleByName(cg, targetName);
+      if (!targetModule) {
+        lines.push(`${indent}    - ${targetName} (unresolved module)`);
+      } else if (nextPath.has(targetModule.id)) {
+        lines.push(`${indent}    - ${targetName} (cycle)`);
+      } else {
+        lines.push(...this.buildHdlModuleTree(cg, targetModule, focusId, depth + 2, nextPath, maxDepth));
+      }
+    }
+
+    return lines;
+  }
+
+  private formatHdlTreeClockReset(module: Node): string {
+    const meta = hdlMetadata(module);
+    const clocks = Array.isArray(meta.clocks)
+      ? meta.clocks.map((item) => String(metadataRecord(item).name ?? '')).filter(Boolean)
+      : [];
+    const resets = Array.isArray(meta.resets)
+      ? meta.resets.map((item) => String(metadataRecord(item).name ?? '')).filter(Boolean)
+      : [];
+    const parts = [
+      clocks.length > 0 ? `clk=${clocks.join('|')}` : undefined,
+      resets.length > 0 ? `rst=${resets.join('|')}` : undefined,
+    ].filter((item): item is string => Boolean(item));
+    return parts.length > 0 ? ` [${parts.join(', ')}]` : '';
+  }
+
+  private formatHdlSignalAttributes(meta: Record<string, unknown>): string {
+    const direction = stringValue(meta.direction);
+    const width = stringValue(meta.width);
+    const parts = [
+      meta.role ? `role=${String(meta.role)}` : 'role=signal',
+      direction ? `direction=${direction}` : undefined,
+      width ? `width=${width}` : undefined,
+      meta.dataType ? `type=${String(meta.dataType)}` : undefined,
+      meta.clockLike === true ? 'clock-like' : undefined,
+      meta.resetLike === true ? `reset-like/${String(meta.resetPolarity ?? 'unknown')}` : undefined,
+    ].filter((item): item is string => Boolean(item));
+    return parts.join(', ');
+  }
+
+  private formatHdlSignalList(nodes: Node[]): string {
+    const unique = nodes.filter((node, index, items) => items.findIndex((item) => item.id === node.id) === index);
+    return unique.map((node) => this.formatHdlSignalLabel(node)).join(', ');
+  }
+
+  private formatHdlSignalLabel(node: Node): string {
+    const meta = hdlMetadata(node);
+    const parts = [
+      hdlRole(node) ?? 'signal',
+      stringValue(meta.direction),
+    ].filter((item): item is string => Boolean(item));
+    const suffix = parts.length > 0 ? ` [${parts.join('/')}]` : '';
+    return `${node.qualifiedName}${suffix} (${node.filePath}:${node.startLine})`;
+  }
+
+  private collectHdlFlowGraph(
+    cg: CodeGraph,
+    start: Node,
+    direction: 'upstream' | 'downstream',
+    maxDepth: number,
+    maxNodes: number
+  ): HdlFlowGraph {
+    const nodes = new Map<string, Node>([[start.id, start]]);
+    const edges = new Map<string, HdlFlowGraphEdge>();
+    const queue: Array<{ node: Node; depth: number }> = [{ node: start, depth: 0 }];
+    const seen = new Set<string>([start.id]);
+
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      if (current.depth >= maxDepth || nodes.size >= maxNodes) continue;
+
+      for (const hop of this.hdlSignalHops(cg, current.node, direction)) {
+        const source = direction === 'upstream' ? hop.node : current.node;
+        const target = direction === 'upstream' ? current.node : hop.node;
+        const edgeKey = `${source.id}:${target.id}:${hop.kind}:${hop.note}`;
+        if (!edges.has(edgeKey)) {
+          edges.set(edgeKey, {
+            source,
+            target,
+            note: hop.note,
+            kind: hop.kind,
+            line: hop.line,
+            expression: hop.expression,
+          });
+        }
+
+        if (!nodes.has(hop.node.id)) {
+          nodes.set(hop.node.id, hop.node);
+        }
+        if (!seen.has(hop.node.id) && nodes.size < maxNodes) {
+          seen.add(hop.node.id);
+          queue.push({ node: hop.node, depth: current.depth + 1 });
+        }
+      }
+    }
+
+    return {
+      nodes: [...nodes.values()],
+      edges: [...edges.values()],
+    };
+  }
+
+  private findHdlLeafNodes(graph: HdlFlowGraph, direction: 'upstream' | 'downstream'): Node[] {
+    if (graph.nodes.length === 0) return [];
+
+    const indegree = new Map<string, number>();
+    const outdegree = new Map<string, number>();
+    for (const node of graph.nodes) {
+      indegree.set(node.id, 0);
+      outdegree.set(node.id, 0);
+    }
+    for (const edge of graph.edges) {
+      indegree.set(edge.target.id, (indegree.get(edge.target.id) ?? 0) + 1);
+      outdegree.set(edge.source.id, (outdegree.get(edge.source.id) ?? 0) + 1);
+    }
+
+    return graph.nodes.filter((node) => (
+      direction === 'upstream'
+        ? (indegree.get(node.id) ?? 0) === 0
+        : (outdegree.get(node.id) ?? 0) === 0
+    ));
+  }
+
+  private formatHdlDerivations(edges: HdlFlowGraphEdge[]): string[] {
+    const grouped = new Map<string, { target: Node; sources: Node[]; expression?: string; line?: number }>();
+
+    for (const edge of edges) {
+      if (edge.kind !== 'signal_dependency') continue;
+      const key = `${edge.target.id}:${edge.line ?? 0}:${edge.expression ?? ''}`;
+      const existing = grouped.get(key);
+      if (existing) {
+        if (!existing.sources.some((source) => source.id === edge.source.id)) {
+          existing.sources.push(edge.source);
+        }
+      } else {
+        grouped.set(key, {
+          target: edge.target,
+          sources: [edge.source],
+          expression: edge.expression,
+          line: edge.line,
+        });
+      }
+    }
+
+    return [...grouped.values()]
+      .sort((a, b) => (a.line ?? 0) - (b.line ?? 0))
+      .map((group) => {
+        const deps = group.sources.map((source) => `\`${source.qualifiedName}\``).join(', ');
+        const expr = group.expression ? ` via \`${group.expression}\`` : '';
+        return `- \`${group.target.qualifiedName}\` <= ${deps}${expr}`;
+      });
+  }
+
+  private appendHdlSignalTree(
+    cg: CodeGraph,
+    node: Node,
+    direction: 'upstream' | 'downstream',
+    lines: string[],
+    depth: number,
+    seen: Set<string>,
+    maxDepth: number,
+    note: string
+  ): void {
+    const indent = '  '.repeat(depth);
+    const arrow = depth === 0 ? '-' : direction === 'upstream' ? '<-' : '->';
+    const seenKey = `${direction}:${node.id}`;
+    const cycle = seen.has(seenKey) ? ' [cycle]' : '';
+    lines.push(`${indent}${arrow} ${this.formatHdlSignalLabel(node)}${note}${cycle}`);
+    if (cycle || depth >= maxDepth) return;
+
+    seen.add(seenKey);
+    const hops = this.hdlSignalHops(cg, node, direction);
+    for (const hop of hops.slice(0, 12)) {
+      this.appendHdlSignalTree(cg, hop.node, direction, lines, depth + 1, seen, maxDepth, hop.note);
+    }
+    if (hops.length > 12) {
+      lines.push(`${indent}  ... +${hops.length - 12} more`);
+    }
+  }
+
+  private hdlSignalHops(
+    cg: CodeGraph,
+    node: Node,
+    direction: 'upstream' | 'downstream'
+  ): HdlFlowHop[] {
+    const hops: HdlFlowHop[] = [];
+    const dependencyEdges = direction === 'upstream'
+      ? cg.getIncomingEdges(node.id).filter((edge) => edge.kind === 'signal_dependency')
+      : cg.getOutgoingEdges(node.id).filter((edge) => edge.kind === 'signal_dependency');
+
+    for (const edge of dependencyEdges) {
+      const next = cg.getNode(direction === 'upstream' ? edge.source : edge.target);
+      if (!next) continue;
+      const expression = stringValue(metadataRecord(edge.metadata).expression);
+      const note = expression ? ` [${edge.line ?? '?'}: ${expression}]` : '';
+      hops.push({
+        node: next,
+        note,
+        kind: 'signal_dependency',
+        line: edge.line,
+        expression,
+      });
+    }
+
+    this.addActualPortSignalHops(cg, node, direction, hops);
+    this.addFormalPortSignalHops(cg, node, direction, hops);
+
+    const seen = new Set<string>();
+    return hops.filter((hop) => {
+      const key = `${hop.node.id}:${hop.kind}:${hop.note}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }
+
+  private addActualPortSignalHops(
+    cg: CodeGraph,
+    node: Node,
+    direction: 'upstream' | 'downstream',
+    hops: HdlFlowHop[]
+  ): void {
+    const portEdges = cg.getIncomingEdges(node.id).filter((edge) => edge.kind === 'port_connection');
+    for (const edge of portEdges) {
+      const edgeMeta = metadataRecord(edge.metadata);
+      const targetModule = stringValue(edgeMeta.targetModule);
+      const formalPort = stringValue(edgeMeta.formalPort);
+      if (!targetModule || !formalPort) continue;
+
+      const formalNode = this.findHdlPortNode(cg, targetModule, formalPort);
+      if (!formalNode) continue;
+
+      const formalDirection = stringValue(hdlMetadata(formalNode).direction);
+      const instance = cg.getNode(edge.source);
+      if (direction === 'upstream' && (formalDirection === 'output' || formalDirection === 'inout')) {
+        hops.push({
+          node: formalNode,
+          note: ` [from ${instance?.name ?? 'instance'}.${formalPort}]`,
+          kind: 'instance_output',
+        });
+      } else if (direction === 'downstream' && (formalDirection === 'input' || formalDirection === 'inout')) {
+        hops.push({
+          node: formalNode,
+          note: ` [into ${instance?.name ?? 'instance'}.${formalPort}]`,
+          kind: 'instance_input',
+        });
+      }
+    }
+  }
+
+  private addFormalPortSignalHops(
+    cg: CodeGraph,
+    node: Node,
+    direction: 'upstream' | 'downstream',
+    hops: HdlFlowHop[]
+  ): void {
+    if (hdlRole(node) !== 'port') return;
+
+    const module = this.getContainingHdlModule(cg, node);
+    if (!module) return;
+
+    const portDirection = stringValue(hdlMetadata(node).direction);
+    if (direction === 'upstream' && portDirection !== 'input' && portDirection !== 'inout') return;
+    if (direction === 'downstream' && portDirection !== 'output' && portDirection !== 'inout') return;
+
+    for (const conn of this.findInstanceConnectionsToFormal(cg, module.name, node.name)) {
+      const note = direction === 'upstream'
+        ? ` [from parent actual via ${conn.instance.name}.${node.name}]`
+        : ` [to parent actual via ${conn.instance.name}.${node.name}]`;
+      hops.push({
+        node: conn.actual,
+        note,
+        kind: direction === 'upstream' ? 'parent_input' : 'parent_output',
+      });
+    }
+  }
+
+  private findHdlPortNode(cg: CodeGraph, moduleName: string, portName: string): Node | undefined {
+    const module = this.findHdlModuleByName(cg, moduleName);
+    if (!module) return undefined;
+    return this.getHdlPorts(cg, module).find((port) => port.name === portName);
+  }
+
+  private getContainingHdlModule(cg: CodeGraph, node: Node): Node | undefined {
+    return cg.getIncomingEdges(node.id)
+      .filter((edge) => edge.kind === 'contains')
+      .map((edge) => cg.getNode(edge.source))
+      .find((parent): parent is Node => Boolean(parent && isHdlNode(parent) && parent.kind === 'module'));
+  }
+
+  private findInstanceConnectionsToFormal(
+    cg: CodeGraph,
+    moduleName: string,
+    formalPort: string
+  ): Array<{ instance: Node; actual: Node }> {
+    const out: Array<{ instance: Node; actual: Node }> = [];
+    const instances = cg.getNodesByKind('variable')
+      .filter((node) => hdlRole(node) === 'instance' && stringValue(hdlMetadata(node).targetModule) === moduleName);
+
+    for (const instance of instances) {
+      const matches = cg.getOutgoingEdges(instance.id)
+        .filter((edge) => edge.kind === 'port_connection')
+        .filter((edge) => stringValue(metadataRecord(edge.metadata).formalPort) === formalPort);
+      for (const edge of matches) {
+        const actual = cg.getNode(edge.target);
+        if (actual) out.push({ instance, actual });
+      }
+    }
+
+    return out;
+  }
+
   private formatNodeDetails(node: Node, code: string | null, outline?: string | null): string {
     const location = node.startLine ? `:${node.startLine}` : '';
     const lines: string[] = [
@@ -3542,6 +4185,10 @@ export class ToolHandler {
       '',
       `**Location:** ${node.filePath}${location}`,
     ];
+
+    if (node.qualifiedName && node.qualifiedName !== node.name) {
+      lines.push(`**Qualified:** \`${node.qualifiedName}\``);
+    }
 
     if (node.signature) {
       lines.push(`**Signature:** \`${node.signature}\``);

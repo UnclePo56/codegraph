@@ -39,6 +39,7 @@ import {
 } from './types';
 import {
   atomicWriteFileSync,
+  getMcpServerInvocation,
   jsonDeepEqual,
   removeMarkedSection,
 } from './shared';
@@ -95,9 +96,10 @@ function parseConfig(text: string): Record<string, any> {
 }
 
 function getOpencodeServerEntry(): { type: string; command: string[]; enabled: boolean } {
+  const invocation = getMcpServerInvocation();
   return {
     type: 'local',
-    command: ['codegraph', 'serve', '--mcp'],
+    command: [invocation.command, ...invocation.args],
     enabled: true,
   };
 }

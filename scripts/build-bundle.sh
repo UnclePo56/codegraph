@@ -83,6 +83,21 @@ if [ "$OSFAM" = "win32" ]; then
   cp "$NODE_BIN" "$STAGE/node.exe"
   printf '@"%%~dp0..\\node.exe" --liftoff-only "%%~dp0..\\lib\\dist\\bin\\codegraph.js" %%*\r\n' \
     > "$STAGE/bin/codegraph.cmd"
+  cat > "$STAGE/bin/codegraph-mcp.ps1" <<'LAUNCH'
+$ErrorActionPreference = 'Stop'
+
+param(
+  [Parameter(ValueFromRemainingArguments = $true)]
+  [string[]] $CommandArgs
+)
+
+$bundleRoot = Split-Path -Parent $PSScriptRoot
+$nodeExe = Join-Path $bundleRoot 'node.exe'
+$entry = Join-Path $bundleRoot 'lib\dist\bin\codegraph.js'
+
+& $nodeExe '--liftoff-only' $entry @CommandArgs
+exit $LASTEXITCODE
+LAUNCH
 else
   cp "$NODE_BIN" "$STAGE/node"
   cat > "$STAGE/bin/codegraph" <<'LAUNCH'

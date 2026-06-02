@@ -22,6 +22,7 @@ import { ALL_TARGETS, getTarget, resolveTargetFlag } from '../src/installer/targ
 import { uninstallTargets } from '../src/installer';
 import { upsertTomlTable, removeTomlTable, buildTomlTable } from '../src/installer/targets/toml';
 import { cleanupLegacyHooks } from '../src/installer/targets/claude';
+import { getMcpServerConfig } from '../src/installer/targets/shared';
 
 function mkTmpDir(label: string): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), `cg-targets-${label}-`));
@@ -66,6 +67,29 @@ const LEGACY_BLOCK = [
   'Prefer `codegraph_search` / `codegraph_callers` over grep.',
   '<!-- CODEGRAPH_END -->',
 ].join('\n');
+
+function withBundledWindowsLauncher<T>(fn: (launcherPath: string) => T): T {
+  const savedPlatform = process.platform;
+  const savedExecPath = process.execPath;
+  const bundleDir = mkTmpDir('bundle');
+  const nodeExe = path.join(bundleDir, 'node.exe');
+  const launcherPath = path.join(bundleDir, 'bin', 'codegraph-mcp.ps1');
+
+  fs.mkdirSync(path.dirname(launcherPath), { recursive: true });
+  fs.writeFileSync(nodeExe, '');
+  fs.writeFileSync(launcherPath, '');
+
+  Object.defineProperty(process, 'platform', { value: 'win32' });
+  Object.defineProperty(process, 'execPath', { value: nodeExe });
+
+  try {
+    return fn(launcherPath);
+  } finally {
+    Object.defineProperty(process, 'platform', { value: savedPlatform });
+    Object.defineProperty(process, 'execPath', { value: savedExecPath });
+    fs.rmSync(bundleDir, { recursive: true, force: true });
+  }
+}
 
 describe('Installer targets — contract', () => {
   let tmpHome: string;
@@ -337,6 +361,57 @@ describe('Installer targets — partial-state idempotency', () => {
     expect(paths.some((p) => p.endsWith('/opencode.jsonc'))).toBe(true);
     expect(paths.some((p) => p.endsWith('/AGENTS.md'))).toBe(false);
     expect(fs.existsSync(path.join(process.cwd(), 'AGENTS.md'))).toBe(false);
+  });
+
+  it('shared: bundled Windows installs use the hidden PowerShell MCP launcher', () => {
+    withBundledWindowsLauncher((launcherPath) => {
+      expect(getMcpServerConfig()).toEqual({
+        type: 'stdio',
+        command: 'powershell.exe',
+        args: [
+          '-NoLogo',
+          '-NoProfile',
+          '-NonInteractive',
+          '-ExecutionPolicy',
+          'Bypass',
+          '-WindowStyle',
+          'Hidden',
+          '-File',
+          launcherPath,
+          'serve',
+          '--mcp',
+        ],
+      });
+    });
+  });
+
+  it('opencode: bundled Windows installs write the hidden PowerShell launcher command array', () => {
+    withBundledWindowsLauncher((launcherPath) => {
+      const opencode = getTarget('opencode')!;
+      opencode.install('global', { autoAllow: true });
+
+      const cfg = JSON.parse(
+        fs.readFileSync(path.join(tmpHome, '.config', 'opencode', 'opencode.jsonc'), 'utf-8'),
+      );
+      expect(cfg.mcp.codegraph).toEqual({
+        type: 'local',
+        command: [
+          'powershell.exe',
+          '-NoLogo',
+          '-NoProfile',
+          '-NonInteractive',
+          '-ExecutionPolicy',
+          'Bypass',
+          '-WindowStyle',
+          'Hidden',
+          '-File',
+          launcherPath,
+          'serve',
+          '--mcp',
+        ],
+        enabled: true,
+      });
+    });
   });
 
   it('gemini: install writes settings.json (mcpServers.codegraph) and no GEMINI.md (#529)', () => {
@@ -673,6 +748,33 @@ describe('Installer targets — partial-state idempotency', () => {
     expect(fs.existsSync(geminiMd)).toBe(false);
   });
 
+  it('antigravity: bundled Windows installs use the hidden PowerShell launcher', () => {
+    withBundledWindowsLauncher((launcherPath) => {
+      const antigravity = getTarget('antigravity')!;
+      antigravity.install('global', { autoAllow: true });
+
+      const cfg = JSON.parse(
+        fs.readFileSync(path.join(tmpHome, '.gemini', 'antigravity', 'mcp_config.json'), 'utf-8'),
+      );
+      expect(cfg.mcpServers.codegraph).toEqual({
+        command: 'powershell.exe',
+        args: [
+          '-NoLogo',
+          '-NoProfile',
+          '-NonInteractive',
+          '-ExecutionPolicy',
+          'Bypass',
+          '-WindowStyle',
+          'Hidden',
+          '-File',
+          launcherPath,
+          'serve',
+          '--mcp',
+        ],
+      });
+    });
+  });
+
   it('gemini + antigravity: both installed coexist (separate MCP files, shared GEMINI.md)', () => {
     const gemini = getTarget('gemini')!;
     const antigravity = getTarget('antigravity')!;
@@ -722,6 +824,19 @@ describe('Installer targets — partial-state idempotency', () => {
 
     const second = hermes.install('global', { autoAllow: true });
     expect(second.files[0].action).toBe('unchanged');
+  });
+
+  it('hermes: bundled Windows installs render the hidden PowerShell launcher in YAML', () => {
+    withBundledWindowsLauncher((launcherPath) => {
+      const hermes = getTarget('hermes')!;
+      hermes.install('global', { autoAllow: true });
+
+      const body = fs.readFileSync(path.join(tmpHome, '.hermes', 'config.yaml'), 'utf-8');
+      expect(body).toContain('command: powershell.exe');
+      expect(body).toContain('      - -WindowStyle');
+      expect(body).toContain('      - Hidden');
+      expect(body).toContain(`      - '${launcherPath.replace(/'/g, "''")}'`);
+    });
   });
 
   it('hermes: uninstall removes only codegraph MCP server and toolset entry', () => {

@@ -3,13 +3,144 @@ import type { Node } from '../../types';
 import { getNodeText } from '../tree-sitter-helpers';
 import type { ExtractorContext, LanguageExtractor } from '../tree-sitter-types';
 
+type NamedAssociation = {
+  formal: string;
+  actual: string;
+};
+
 const IDENTIFIER_TYPES = new Set([
   'simple_identifier',
   'escaped_identifier',
 ]);
 
+const HDL_IDENTIFIER_RE = /\b[A-Za-z_][A-Za-z0-9_$]*\b/g;
+const HDL_EXPRESSION_KEYWORDS = new Set([
+  'always',
+  'always_comb',
+  'always_ff',
+  'always_latch',
+  'assign',
+  'automatic',
+  'begin',
+  'bit',
+  'case',
+  'casex',
+  'casez',
+  'default',
+  'else',
+  'end',
+  'endcase',
+  'endfunction',
+  'endmodule',
+  'endtask',
+  'for',
+  'foreach',
+  'function',
+  'generate',
+  'genvar',
+  'if',
+  'inout',
+  'input',
+  'integer',
+  'int',
+  'localparam',
+  'logic',
+  'module',
+  'negedge',
+  'output',
+  'parameter',
+  'posedge',
+  'reg',
+  'signed',
+  'task',
+  'tri',
+  'unsigned',
+  'wire',
+]);
+
 function cleanIdentifier(text: string): string {
   return text.replace(/^\\/, '').trim();
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function withHdlMetadata(extra: Partial<Node> | undefined, hdl: Record<string, unknown>): Partial<Node> {
+  const metadata = asRecord(extra?.metadata);
+  return {
+    ...(extra ?? {}),
+    metadata: {
+      ...metadata,
+      hdl: {
+        ...asRecord(metadata.hdl),
+        ...hdl,
+      },
+    },
+  };
+}
+
+function attachHdlMetadata(node: Node, hdl: Record<string, unknown>): void {
+  const metadata = asRecord(node.metadata);
+  node.metadata = {
+    ...metadata,
+    hdl: {
+      ...asRecord(metadata.hdl),
+      ...hdl,
+    },
+  };
+}
+
+function isClockLikeName(name: string): boolean {
+  const lower = name.toLowerCase();
+  return (
+    lower === 'clk' ||
+    lower === 'clock' ||
+    /(^|_)(clk|clock|aclk|pclk|hclk|sclk|mclk)(_|$)/.test(lower)
+  );
+}
+
+function isResetLikeName(name: string): boolean {
+  const lower = name.toLowerCase();
+  return (
+    lower === 'rst' ||
+    lower === 'reset' ||
+    /(^|_)(rst|reset|rst_n|reset_n|rstn|resetn|aresetn|areset_n|nrst)(_|$)/.test(lower)
+  );
+}
+
+function resetPolarity(name: string): 'active_low' | 'active_high' {
+  const lower = name.toLowerCase();
+  return /(^|_)(rst_n|reset_n|rstn|resetn|aresetn|areset_n|nrst)(_|$)|_n$/.test(lower)
+    ? 'active_low'
+    : 'active_high';
+}
+
+function hdlSignalMetadata(
+  name: string,
+  signature: string | undefined,
+  role: 'port' | 'signal' | 'parameter'
+): Record<string, unknown> {
+  const text = signature?.replace(/\s+/g, ' ').trim() ?? '';
+  const direction = text.match(/\b(input|output|inout|ref)\b/)?.[1];
+  const dataType = text.match(/\b(wire|reg|logic|tri|bit|integer|int)\b/)?.[1];
+  const width = text.match(/\[[^\]]+\]/)?.[0];
+  const clockLike = isClockLikeName(name);
+  const resetLike = isResetLikeName(name);
+  const metadata: Record<string, unknown> = { role };
+
+  if (direction) metadata.direction = direction;
+  if (dataType) metadata.dataType = dataType;
+  if (width) metadata.width = width;
+  if (clockLike) metadata.clockLike = true;
+  if (resetLike) {
+    metadata.resetLike = true;
+    metadata.resetPolarity = resetPolarity(name);
+  }
+
+  return metadata;
 }
 
 function firstIdentifier(node: SyntaxNode | null): SyntaxNode | null {
@@ -240,6 +371,10 @@ function createScopedNode(
     const child = node.namedChild(i);
     if (child) ctx.visitNode(child);
   }
+  if (kind === 'module' || kind === 'interface') {
+    annotateHdlContainer(created, kind, ctx);
+    createSignalDependencyEdges(created, node, ctx);
+  }
   ctx.popScope();
   return true;
 }
@@ -282,13 +417,57 @@ function findScopedNode(
   ));
 }
 
+function findMatchingParen(text: string, openIndex: number): number {
+  let depth = 0;
+  for (let i = openIndex; i < text.length; i++) {
+    const char = text[i];
+    if (char === '(') {
+      depth++;
+    } else if (char === ')') {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+function parseNamedAssociations(text: string): NamedAssociation[] {
+  const associations: NamedAssociation[] = [];
+  const re = /\.\s*([A-Za-z_][A-Za-z0-9_$]*)\s*\(/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = re.exec(text)) !== null) {
+    const openIndex = text.indexOf('(', match.index);
+    if (openIndex < 0) continue;
+
+    const closeIndex = findMatchingParen(text, openIndex);
+    if (closeIndex < 0) continue;
+
+    associations.push({
+      formal: match[1]!,
+      actual: text.slice(openIndex + 1, closeIndex).replace(/\s+/g, ' ').trim(),
+    });
+    re.lastIndex = closeIndex + 1;
+  }
+
+  return associations;
+}
+
+function parameterOverrideBody(text: string): string | null {
+  const hashIndex = text.indexOf('#');
+  if (hashIndex < 0) return null;
+
+  const openIndex = text.indexOf('(', hashIndex);
+  if (openIndex < 0) return null;
+
+  const closeIndex = findMatchingParen(text, openIndex);
+  if (closeIndex < 0) return null;
+
+  return text.slice(openIndex + 1, closeIndex);
+}
+
 function parseNamedPortConnection(text: string): { formal: string; actual: string } | null {
-  const match = text.trim().replace(/,\s*$/, '').match(/^\.\s*([A-Za-z_][A-Za-z0-9_$]*)\s*\(([\s\S]*)\)$/);
-  if (!match) return null;
-  return {
-    formal: match[1]!,
-    actual: match[2]!.replace(/\s+/g, ' ').trim(),
-  };
+  return parseNamedAssociations(text.trim().replace(/,\s*$/, ''))[0] ?? null;
 }
 
 function simpleActualSignalName(actual: string): string | undefined {
@@ -297,11 +476,142 @@ function simpleActualSignalName(actual: string): string | undefined {
   return match?.[1];
 }
 
+function signalNamesInExpression(expression: string): string[] {
+  const names = new Set<string>();
+  for (const match of expression.matchAll(HDL_IDENTIFIER_RE)) {
+    const name = match[0];
+    if (!HDL_EXPRESSION_KEYWORDS.has(name.toLowerCase())) {
+      names.add(name);
+    }
+  }
+  return [...names];
+}
+
+function parseAssignmentLine(line: string): {
+  targets: string[];
+  expression: string;
+  assignmentKind: 'continuous' | 'procedural';
+} | null {
+  const withoutComment = line.replace(/\/\/.*$/, '');
+  const trimmed = withoutComment.trim();
+  if (!trimmed || trimmed.startsWith('`')) return null;
+
+  const continuous = trimmed.match(/^assign\s+(.+?)\s*=\s*(.+?);/);
+  if (continuous) {
+    return {
+      targets: signalNamesInExpression(continuous[1] ?? ''),
+      expression: continuous[2]?.trim() ?? '',
+      assignmentKind: 'continuous',
+    };
+  }
+
+  if (/^(?:input|output|inout|wire|reg|logic|bit|int|integer|parameter|localparam)\b/.test(trimmed)) {
+    return null;
+  }
+
+  const ifAssignment = trimmed.match(/^if\s*\((.*?)\)\s+(.+?)\s*(<=|=)\s*(.+?);/);
+  if (ifAssignment) {
+    return {
+      targets: signalNamesInExpression(ifAssignment[2] ?? ''),
+      expression: `${ifAssignment[1] ?? ''} ${ifAssignment[4] ?? ''}`.trim(),
+      assignmentKind: 'procedural',
+    };
+  }
+
+  const procedural = trimmed.match(/^(.+?)\s*(<=|=)\s*(.+?);/);
+  if (!procedural || /[=!<>]=/.test(procedural[1] ?? '')) return null;
+
+  return {
+    targets: signalNamesInExpression(procedural[1] ?? ''),
+    expression: procedural[3]?.trim() ?? '',
+    assignmentKind: 'procedural',
+  };
+}
+
+function createSignalDependencyEdges(container: Node, syntaxNode: SyntaxNode, ctx: ExtractorContext): void {
+  const source = getNodeText(syntaxNode, ctx.source);
+  const lines = source.split(/\r?\n/);
+  const signalKinds = new Set(['field', 'variable']);
+
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+    const parsed = parseAssignmentLine(lines[lineIndex] ?? '');
+    if (!parsed || parsed.expression.length === 0) continue;
+
+    const targets = parsed.targets
+      .map((name) => findScopedNode(ctx, signalKinds, name))
+      .filter((node): node is Node => Boolean(node));
+    if (targets.length === 0) continue;
+
+    const dependencies = signalNamesInExpression(parsed.expression)
+      .map((name) => findScopedNode(ctx, signalKinds, name))
+      .filter((node): node is Node => Boolean(node));
+
+    const line = syntaxNode.startPosition.row + lineIndex + 1;
+    for (const target of targets) {
+      for (const dependency of dependencies) {
+        if (dependency.id === target.id) continue;
+        ctx.addEdge({
+          source: dependency.id,
+          target: target.id,
+          kind: 'signal_dependency',
+          line,
+          column: 0,
+          provenance: 'tree-sitter',
+          metadata: {
+            container: container.name,
+            assignmentKind: parsed.assignmentKind,
+            expression: parsed.expression,
+          },
+        });
+      }
+    }
+  }
+}
+
+function annotateHdlContainer(container: Node, role: 'module' | 'interface', ctx: ExtractorContext): void {
+  const directChildPrefix = `${container.qualifiedName}::`;
+  const directChildren = ctx.nodes.filter((node) => {
+    if (node.filePath !== container.filePath) return false;
+    if (!node.qualifiedName.startsWith(directChildPrefix)) return false;
+    return !node.qualifiedName.slice(directChildPrefix.length).includes('::');
+  });
+
+  const ports = directChildren.filter((node) => asRecord(node.metadata?.hdl).role === 'port');
+  const clocks = ports
+    .filter((node) => asRecord(node.metadata?.hdl).clockLike === true)
+    .map((node) => ({
+      name: node.name,
+      direction: asRecord(node.metadata?.hdl).direction,
+      line: node.startLine,
+    }));
+  const resets = ports
+    .filter((node) => asRecord(node.metadata?.hdl).resetLike === true)
+    .map((node) => ({
+      name: node.name,
+      direction: asRecord(node.metadata?.hdl).direction,
+      polarity: asRecord(node.metadata?.hdl).resetPolarity,
+      line: node.startLine,
+    }));
+
+  attachHdlMetadata(container, {
+    role,
+    clocks,
+    resets,
+    ports: ports.map((node) => ({
+      name: node.name,
+      direction: asRecord(node.metadata?.hdl).direction,
+      width: asRecord(node.metadata?.hdl).width,
+      line: node.startLine,
+    })),
+  });
+}
+
 function createNamedDecls(
   ctx: ExtractorContext,
   nodes: SyntaxNode[],
   kind: 'field' | 'variable' | 'constant' | 'parameter' | 'type_alias',
-  signaturePrefix?: string
+  signaturePrefix?: string,
+  hdlRole?: 'signal' | 'parameter'
 ): void {
   for (const node of nodes) {
     const idNode = firstIdentifier(node);
@@ -316,18 +626,29 @@ function createNamedDecls(
     const signature = signaturePrefix
       ? (signaturePrefix.includes(name) ? signaturePrefix : `${signaturePrefix} ${name}`)
       : undefined;
-    ctx.createNode(kind, name, node, { signature });
+    const extra = hdlRole
+      ? withHdlMetadata({ signature }, hdlSignalMetadata(name, signature, hdlRole))
+      : { signature };
+    ctx.createNode(kind, name, node, extra);
   }
 }
 
-function createSignalDecls(ctx: ExtractorContext, nodes: SyntaxNode[], declarationNode: SyntaxNode): void {
+function createSignalDecls(
+  ctx: ExtractorContext,
+  nodes: SyntaxNode[],
+  declarationNode: SyntaxNode,
+  role: 'port' | 'signal'
+): void {
   const signature = compactSignature(declarationNode, ctx.source);
   for (const node of nodes) {
     const idNode = firstIdentifier(node);
     if (!idNode) continue;
     const name = cleanIdentifier(getNodeText(idNode, ctx.source));
     if (hasScopedNode(ctx, new Set(['field', 'variable']), name)) continue;
-    ctx.createNode('variable', name, node, { signature });
+    ctx.createNode('variable', name, node, withHdlMetadata(
+      { signature },
+      hdlSignalMetadata(name, signature, role)
+    ));
   }
 }
 
@@ -363,7 +684,7 @@ function handlePackageImport(node: SyntaxNode, ctx: ExtractorContext): boolean {
 
 function handleParameterDeclaration(node: SyntaxNode, ctx: ExtractorContext): boolean {
   const assignments = descendantsOfType(node, new Set(['param_assignment']));
-  createNamedDecls(ctx, assignments, 'parameter', 'parameter');
+  createNamedDecls(ctx, assignments, 'parameter', compactSignature(node, ctx.source) ?? 'parameter', 'parameter');
 
   const typeAssignments = descendantsOfType(node, new Set(['type_assignment']));
   createNamedDecls(ctx, typeAssignments, 'type_alias', 'type');
@@ -388,13 +709,19 @@ function handleDataDeclaration(node: SyntaxNode, ctx: ExtractorContext): boolean
   const kind = parentKind === 'class' || parentKind === 'struct'
     ? 'field'
     : 'variable';
-  createNamedDecls(ctx, decls, kind, compactSignature(node, ctx.source));
+  createNamedDecls(
+    ctx,
+    decls,
+    kind,
+    compactSignature(node, ctx.source),
+    parentKind === 'module' || parentKind === 'interface' ? 'signal' : undefined
+  );
   return true;
 }
 
 function handleNetDeclaration(node: SyntaxNode, ctx: ExtractorContext): boolean {
   const decls = descendantsOfType(node, new Set(['net_decl_assignment']));
-  createNamedDecls(ctx, decls, 'variable', compactSignature(node, ctx.source) ?? 'net');
+  createNamedDecls(ctx, decls, 'variable', compactSignature(node, ctx.source) ?? 'net', 'signal');
   return true;
 }
 
@@ -403,7 +730,7 @@ function handlePortDeclaration(node: SyntaxNode, ctx: ExtractorContext): boolean
   if (parentKind !== 'module' && parentKind !== 'interface') return false;
 
   const ports = descendantsOfType(node, new Set(['port_identifier']));
-  createSignalDecls(ctx, ports, node);
+  createSignalDecls(ctx, ports, node, 'port');
   return true;
 }
 
@@ -487,6 +814,7 @@ function handleInstantiation(node: SyntaxNode, ctx: ExtractorContext): boolean {
   if (!targetNode) return true;
   const targetName = cleanIdentifier(getNodeText(targetNode, ctx.source));
   const parentId = ctx.nodeStack[ctx.nodeStack.length - 1];
+  const parameterOverrides = parseNamedAssociations(parameterOverrideBody(getNodeText(node, ctx.source)) ?? '');
 
   if (parentId) {
     for (const referenceKind of ['instantiates', 'connects'] as const) {
@@ -533,6 +861,14 @@ function handleInstantiation(node: SyntaxNode, ctx: ExtractorContext): boolean {
 
     const instanceNode = ctx.createNode('variable', instanceName, inst, {
       signature,
+      metadata: {
+        hdl: {
+          role: 'instance',
+          targetModule: targetName,
+          parameterOverrides,
+          portConnections: parsedConnections.map((conn) => conn.parsed),
+        },
+      },
     });
     if (!instanceNode) continue;
 

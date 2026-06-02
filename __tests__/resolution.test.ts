@@ -18,6 +18,12 @@ import { detectFrameworks, getAllFrameworkResolvers } from '../src/resolution/fr
 import { QueryBuilder } from '../src/db/queries';
 import { DatabaseConnection } from '../src/db';
 
+function cleanupTempDir(dir: string): void {
+  if (fs.existsSync(dir)) {
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+}
+
 describe('Resolution Module', () => {
   let tempDir: string;
   let cg: CodeGraph;
@@ -32,7 +38,7 @@ describe('Resolution Module', () => {
     if (cg) {
       cg.destroy();
     } else if (fs.existsSync(tempDir)) {
-      fs.rmSync(tempDir, { recursive: true });
+      cleanupTempDir(tempDir);
     }
   });
 
@@ -1495,7 +1501,7 @@ func main() {
         expect(dirs).toContain('src/lib');
         expect(dirs.some(d => d.includes('usr'))).toBe(false);
       } finally {
-        fs.rmSync(tempProject, { recursive: true });
+        cleanupTempDir(tempProject);
       }
     });
 
@@ -1517,7 +1523,7 @@ func main() {
         expect(dirs).toContain('src');
         expect(dirs).not.toContain('docs');
       } finally {
-        fs.rmSync(tempProject, { recursive: true });
+        cleanupTempDir(tempProject);
       }
     });
 
@@ -1547,7 +1553,7 @@ func main() {
         expect(dirs).toContain('cppmod');
         expect(dirs).toContain('iosmod');
       } finally {
-        fs.rmSync(tempProject, { recursive: true });
+        cleanupTempDir(tempProject);
       }
     });
 
@@ -1557,6 +1563,7 @@ func main() {
     // feature can't silently regress to a no-op in the indexing flow.
     it('connects #include to the real header file via include-dir scan (end-to-end)', async () => {
       const tempProject = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-cpp-e2e-'));
+      let localCg: CodeGraph | undefined;
       try {
         fs.mkdirSync(path.join(tempProject, 'include'), { recursive: true });
         fs.mkdirSync(path.join(tempProject, 'src'), { recursive: true });
@@ -1570,36 +1577,41 @@ func main() {
         );
 
         clearCppIncludeDirCache();
-        cg = await CodeGraph.init(tempProject, { index: true });
+        localCg = await CodeGraph.init(tempProject, { index: true });
 
         // Sanity: file nodes exist for the header and the cpp.
-        const allFiles = cg.getStats();
+        const allFiles = localCg.getStats();
         expect(allFiles.fileCount).toBe(2);
 
         // The `#include "utils.h"` edge should target the real
         // `include/utils.h` file node — not a floating `import` node
         // living inside main.cpp.
         const db = DatabaseConnection.open(path.join(tempProject, '.codegraph', 'codegraph.db'));
-        const rows = db.getDb().prepare(`
-          select dst.kind as dstKind, dst.file_path as dstPath
-          from edges e
-          join nodes src on e.source = src.id
-          join nodes dst on e.target = dst.id
-          where e.kind = 'imports'
-            and src.kind = 'file'
-            and src.file_path = 'src/main.cpp'
-        `).all() as Array<{ dstKind: string; dstPath: string }>;
-        const resolvedToHeader = rows.find(
-          (r) => r.dstKind === 'file' && r.dstPath === 'include/utils.h'
-        );
-        expect(resolvedToHeader, 'main.cpp → include/utils.h imports edge missing').toBeDefined();
-        // `<vector>` should NOT produce a file edge — it's a stdlib header.
-        const stdlibFile = rows.find(
-          (r) => r.dstKind === 'file' && r.dstPath && r.dstPath.endsWith('vector')
-        );
-        expect(stdlibFile).toBeUndefined();
+        try {
+          const rows = db.getDb().prepare(`
+            select dst.kind as dstKind, dst.file_path as dstPath
+            from edges e
+            join nodes src on e.source = src.id
+            join nodes dst on e.target = dst.id
+            where e.kind = 'imports'
+              and src.kind = 'file'
+              and src.file_path = 'src/main.cpp'
+          `).all() as Array<{ dstKind: string; dstPath: string }>;
+          const resolvedToHeader = rows.find(
+            (r) => r.dstKind === 'file' && r.dstPath === 'include/utils.h'
+          );
+          expect(resolvedToHeader, 'main.cpp → include/utils.h imports edge missing').toBeDefined();
+          // `<vector>` should NOT produce a file edge — it's a stdlib header.
+          const stdlibFile = rows.find(
+            (r) => r.dstKind === 'file' && r.dstPath && r.dstPath.endsWith('vector')
+          );
+          expect(stdlibFile).toBeUndefined();
+        } finally {
+          db.close();
+        }
       } finally {
-        fs.rmSync(tempProject, { recursive: true, force: true });
+        localCg?.close();
+        cleanupTempDir(tempProject);
       }
     });
   });
