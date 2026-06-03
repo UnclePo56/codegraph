@@ -601,6 +601,31 @@ export const tools: ToolDefinition[] = [
     },
   },
   {
+    name: 'codegraph_hdl_signal_trace',
+    description: 'Structured HDL signal-flow trace. Resolves one HDL signal/port/parameter across module boundaries: origin stimuli, derivations, traversed modules, upstream/downstream edges, and final output ports.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        symbol: {
+          type: 'string',
+          description: 'Qualified HDL signal-like symbol to trace (for example: "top::data_out", "child::din")',
+        },
+        maxDepth: {
+          type: 'number',
+          description: 'Maximum upstream/downstream traversal depth (default: 8)',
+          default: 8,
+        },
+        maxNodes: {
+          type: 'number',
+          description: 'Maximum nodes per direction to include (default: 200)',
+          default: 200,
+        },
+        projectPath: projectPathProperty,
+      },
+      required: ['symbol'],
+    },
+  },
+  {
     name: 'codegraph_explore',
     description: 'Source of SEVERAL related symbols grouped by file, in one capped call. Query is a bag of symbol/file names (not a question). Returned source is verbatim Read-equivalent — do not re-open shown files. Prefer over chained codegraph_node.',
     inputSchema: {
@@ -1165,6 +1190,8 @@ export class ToolHandler {
           result = await this.handleExplore(args); break;
         case 'codegraph_node':
           result = await this.handleNode(args); break;
+        case 'codegraph_hdl_signal_trace':
+          result = await this.handleHdlSignalTrace(args); break;
         case 'codegraph_status':
           // status embeds the pending-files list as a first-class section
           // (see handleStatus), so we skip the auto-banner wrapper here to
@@ -3012,6 +3039,36 @@ export class ToolHandler {
   }
 
   /**
+   * Handle codegraph_hdl_signal_trace
+   */
+  private async handleHdlSignalTrace(args: Record<string, unknown>): Promise<ToolResult> {
+    const symbol = this.validateString(args.symbol, 'symbol');
+    if (typeof symbol !== 'string') return symbol;
+
+    const cg = this.getCodeGraph(args.projectPath as string | undefined);
+    const match = this.findSymbol(cg, symbol);
+    if (!match) {
+      return this.textResult(`Symbol "${symbol}" not found in the codebase`);
+    }
+    if (!isHdlNode(match.node)) {
+      return this.errorResult(`Symbol "${symbol}" is not an HDL node`);
+    }
+
+    const role = hdlRole(match.node);
+    if (role === 'instance' || (match.node.kind !== 'variable' && match.node.kind !== 'field' && match.node.kind !== 'parameter')) {
+      return this.errorResult(`Symbol "${symbol}" is not an HDL signal-like node`);
+    }
+
+    const rawDepth = Number(args.maxDepth);
+    const rawNodes = Number(args.maxNodes);
+    const maxDepth = Number.isFinite(rawDepth) ? clamp(Math.trunc(rawDepth), 1, 32) : 8;
+    const maxNodes = Number.isFinite(rawNodes) ? clamp(Math.trunc(rawNodes), 1, 1000) : 200;
+    const trace = this.buildHdlSignalTrace(cg, match.node, maxDepth, maxNodes);
+
+    return this.textResult(JSON.stringify(trace.output, null, 2) + match.note);
+  }
+
+  /**
    * Build the "trail" for a symbol: its direct callees (what it calls) and
    * callers (what calls it), each with file:line — so codegraph_node doubles as
    * the structural Grep→Read→expand primitive: a spot PLUS where to go next.
@@ -3661,35 +3718,17 @@ export class ToolHandler {
       return lines.join('\n');
     }
 
-    const upstream = this.collectHdlFlowGraph(cg, node, 'upstream', 8, 200);
-    const downstream = this.collectHdlFlowGraph(cg, node, 'downstream', 8, 200);
-    const combinedNodes = new Map<string, Node>();
-    for (const graphNode of [...upstream.nodes, ...downstream.nodes]) {
-      combinedNodes.set(graphNode.id, graphNode);
-    }
-    const traversedModules = [...combinedNodes.values()]
-      .map((graphNode) => this.getContainingHdlModule(cg, graphNode))
-      .filter((module): module is Node => Boolean(module))
-      .filter((module, index, modules) => modules.findIndex((item) => item.id === module.id) === index);
-    const origins = this.findHdlLeafNodes(upstream, 'upstream');
-    const sinks = this.findHdlLeafNodes(downstream, 'downstream');
-    const outputSinks = sinks.filter((sink) => {
-      const sinkMeta = hdlMetadata(sink);
-      const direction = stringValue(sinkMeta.direction);
-      return hdlRole(sink) === 'port' && (direction === 'output' || direction === 'inout');
-    });
-    const finalOutputs = outputSinks.length > 0 ? outputSinks : sinks;
-    const derivations = this.formatHdlDerivations([...upstream.edges, ...downstream.edges]);
+    const trace = this.buildHdlSignalTrace(cg, node, 8, 200);
 
     const lines: string[] = ['', '### HDL Signal Flow'];
     lines.push(`**Qualified node:** \`${node.qualifiedName}\``);
     lines.push(`**Attributes:** ${this.formatHdlSignalAttributes(meta)}`);
-    lines.push(`**Origin stimuli:** ${this.formatHdlSignalList(origins.length > 0 ? origins : [node])}`);
-    lines.push(`**Traversed modules:** ${traversedModules.length > 0 ? traversedModules.map((module) => `${module.name} (${module.filePath}:${module.startLine})`).join(', ') : 'none indexed'}`);
-    lines.push(`**Final output ports:** ${this.formatHdlSignalList(finalOutputs.length > 0 ? finalOutputs : [node])}`);
-    if (derivations.length > 0) {
+    lines.push(`**Origin stimuli:** ${this.formatHdlSignalList(trace.origins.length > 0 ? trace.origins : [node])}`);
+    lines.push(`**Traversed modules:** ${trace.traversedModules.length > 0 ? trace.traversedModules.map((module) => `${module.name} (${module.filePath}:${module.startLine})`).join(', ') : 'none indexed'}`);
+    lines.push(`**Final output ports:** ${this.formatHdlSignalList(trace.finalOutputs.length > 0 ? trace.finalOutputs : [node])}`);
+    if (trace.derivations.length > 0) {
       lines.push('**Derivations:**');
-      lines.push(...derivations);
+      lines.push(...this.formatHdlDerivations(trace.derivations));
     }
     lines.push('**Upstream trace:**');
     this.appendHdlSignalTree(cg, node, 'upstream', lines, 0, new Set<string>(), 5, '');
@@ -3921,6 +3960,62 @@ export class ToolHandler {
     return `${node.qualifiedName}${suffix} (${node.filePath}:${node.startLine})`;
   }
 
+  private buildHdlSignalTrace(
+    cg: CodeGraph,
+    node: Node,
+    maxDepth: number,
+    maxNodes: number
+  ): {
+    output: Record<string, unknown>;
+    origins: Node[];
+    traversedModules: Node[];
+    finalOutputs: Node[];
+    derivations: Array<{ target: Node; sources: Node[]; expression?: string; line?: number }>;
+  } {
+    const upstream = this.collectHdlFlowGraph(cg, node, 'upstream', maxDepth, maxNodes);
+    const downstream = this.collectHdlFlowGraph(cg, node, 'downstream', maxDepth, maxNodes);
+    const combinedNodes = new Map<string, Node>();
+    for (const graphNode of [...upstream.nodes, ...downstream.nodes]) {
+      combinedNodes.set(graphNode.id, graphNode);
+    }
+
+    const traversedModules = [...combinedNodes.values()]
+      .map((graphNode) => this.getContainingHdlModule(cg, graphNode))
+      .filter((module): module is Node => Boolean(module))
+      .filter((module, index, modules) => modules.findIndex((item) => item.id === module.id) === index);
+    const origins = this.findHdlLeafNodes(upstream, 'upstream');
+    const sinks = this.findHdlLeafNodes(downstream, 'downstream');
+    const outputSinks = sinks.filter((sink) => {
+      const sinkMeta = hdlMetadata(sink);
+      const direction = stringValue(sinkMeta.direction);
+      return hdlRole(sink) === 'port' && (direction === 'output' || direction === 'inout');
+    });
+    const finalOutputs = outputSinks.length > 0 ? outputSinks : sinks;
+    const derivations = this.collectHdlDerivations([...upstream.edges, ...downstream.edges]);
+
+    return {
+      output: {
+        symbol: this.serializeHdlNode(node),
+        constraints: { maxDepth, maxNodes },
+        originStimuli: (origins.length > 0 ? origins : [node]).map((item) => this.serializeHdlNode(item)),
+        traversedModules: traversedModules.map((module) => this.serializeHdlModule(module)),
+        finalOutputPorts: (finalOutputs.length > 0 ? finalOutputs : [node]).map((item) => this.serializeHdlNode(item)),
+        derivations: derivations.map((item) => ({
+          target: this.serializeHdlNode(item.target),
+          sources: item.sources.map((source) => this.serializeHdlNode(source)),
+          ...(item.expression ? { expression: item.expression } : {}),
+          ...(item.line !== undefined ? { line: item.line } : {}),
+        })),
+        upstream: this.serializeHdlFlowGraph(upstream),
+        downstream: this.serializeHdlFlowGraph(downstream),
+      },
+      origins,
+      traversedModules,
+      finalOutputs,
+      derivations,
+    };
+  }
+
   private collectHdlFlowGraph(
     cg: CodeGraph,
     start: Node,
@@ -3989,7 +4084,9 @@ export class ToolHandler {
     ));
   }
 
-  private formatHdlDerivations(edges: HdlFlowGraphEdge[]): string[] {
+  private collectHdlDerivations(
+    edges: HdlFlowGraphEdge[]
+  ): Array<{ target: Node; sources: Node[]; expression?: string; line?: number }> {
     const grouped = new Map<string, { target: Node; sources: Node[]; expression?: string; line?: number }>();
 
     for (const edge of edges) {
@@ -4011,12 +4108,76 @@ export class ToolHandler {
     }
 
     return [...grouped.values()]
-      .sort((a, b) => (a.line ?? 0) - (b.line ?? 0))
-      .map((group) => {
-        const deps = group.sources.map((source) => `\`${source.qualifiedName}\``).join(', ');
-        const expr = group.expression ? ` via \`${group.expression}\`` : '';
-        return `- \`${group.target.qualifiedName}\` <= ${deps}${expr}`;
-      });
+      .sort((a, b) => (a.line ?? 0) - (b.line ?? 0));
+  }
+
+  private formatHdlDerivations(
+    derivations: Array<{ target: Node; sources: Node[]; expression?: string; line?: number }>
+  ): string[] {
+    return derivations.map((group) => {
+      const deps = group.sources.map((source) => `\`${source.qualifiedName}\``).join(', ');
+      const expr = group.expression ? ` via \`${group.expression}\`` : '';
+      return `- \`${group.target.qualifiedName}\` <= ${deps}${expr}`;
+    });
+  }
+
+  private serializeHdlNode(node: Node): Record<string, unknown> {
+    const meta = hdlMetadata(node);
+    const out: Record<string, unknown> = {
+      id: node.id,
+      name: node.name,
+      qualifiedName: node.qualifiedName,
+      kind: node.kind,
+      language: node.language,
+      filePath: node.filePath,
+      startLine: node.startLine,
+      endLine: node.endLine,
+      startColumn: node.startColumn,
+      endColumn: node.endColumn,
+      hdl: {
+        role: hdlRole(node) ?? 'signal',
+        ...(meta.direction ? { direction: String(meta.direction) } : {}),
+        ...(meta.width ? { width: String(meta.width) } : {}),
+        ...(meta.dataType ? { dataType: String(meta.dataType) } : {}),
+        ...(meta.clockLike === true ? { clockLike: true } : {}),
+        ...(meta.resetLike === true ? { resetLike: true } : {}),
+        ...(meta.resetPolarity ? { resetPolarity: String(meta.resetPolarity) } : {}),
+      },
+    };
+    if (node.signature) out.signature = node.signature;
+    return out;
+  }
+
+  private serializeHdlModule(node: Node): Record<string, unknown> {
+    const meta = hdlMetadata(node);
+    return {
+      id: node.id,
+      name: node.name,
+      qualifiedName: node.qualifiedName,
+      kind: node.kind,
+      filePath: node.filePath,
+      startLine: node.startLine,
+      endLine: node.endLine,
+      hdl: {
+        role: hdlRole(node) ?? 'module',
+        clocks: Array.isArray(meta.clocks) ? meta.clocks : [],
+        resets: Array.isArray(meta.resets) ? meta.resets : [],
+      },
+    };
+  }
+
+  private serializeHdlFlowGraph(graph: HdlFlowGraph): Record<string, unknown> {
+    return {
+      nodes: graph.nodes.map((node) => this.serializeHdlNode(node)),
+      edges: graph.edges.map((edge) => ({
+        source: this.serializeHdlNode(edge.source),
+        target: this.serializeHdlNode(edge.target),
+        kind: edge.kind,
+        note: edge.note,
+        ...(edge.line !== undefined ? { line: edge.line } : {}),
+        ...(edge.expression ? { expression: edge.expression } : {}),
+      })),
+    };
   }
 
   private appendHdlSignalTree(

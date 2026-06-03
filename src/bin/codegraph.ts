@@ -1167,6 +1167,7 @@ program
         console.error(chalk.cyan('  codegraph_callees') + '   - Find what a symbol calls');
         console.error(chalk.cyan('  codegraph_impact') + '    - Analyze impact of changes');
         console.error(chalk.cyan('  codegraph_node') + '      - Get symbol details');
+        console.error(chalk.cyan('  codegraph_hdl_signal_trace') + ' - Structured HDL signal flow trace');
         console.error(chalk.cyan('  codegraph_files') + '     - Get project file structure');
         console.error(chalk.cyan('  codegraph_status') + '    - Get index status');
       }

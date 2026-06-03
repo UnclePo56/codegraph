@@ -198,4 +198,82 @@ endmodule
       handler.closeAll();
     }
   });
+
+  it('returns structured HDL signal flow for codegraph_hdl_signal_trace', async () => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-hdl-trace-'));
+
+    fs.writeFileSync(path.join(tempDir, 'child.sv'), `
+module child (
+  input  logic       clk,
+  input  logic [7:0] din,
+  output logic [7:0] dout
+);
+logic valid;
+assign dout = valid ? din : 8'h00;
+endmodule
+`);
+
+    fs.writeFileSync(path.join(tempDir, 'top.sv'), `
+module top (
+  input  logic       clk,
+  input  logic [7:0] data_in,
+  output logic [7:0] data_out
+);
+logic [7:0] mid_data;
+
+child u_child (
+  .clk  (clk),
+  .din  (data_in),
+  .dout (mid_data)
+);
+
+assign data_out = mid_data;
+endmodule
+`);
+
+    cg = await CodeGraph.init(tempDir, { index: true });
+    const handler = new ToolHandler(cg);
+
+    try {
+      const response = await handler.execute('codegraph_hdl_signal_trace', {
+        symbol: 'top::data_out',
+        projectPath: tempDir,
+      });
+      const text = response.content[0]?.type === 'text' ? response.content[0].text : '';
+      const parsed = JSON.parse(text) as Record<string, any>;
+
+      expect(parsed.symbol?.qualifiedName).toBe('top::data_out');
+      expect(parsed.originStimuli.map((node: Record<string, any>) => node.qualifiedName)).toContain('child::valid');
+      expect(parsed.originStimuli.map((node: Record<string, any>) => node.qualifiedName)).toContain('top::data_in');
+      expect(parsed.traversedModules.map((node: Record<string, any>) => node.name)).toEqual(expect.arrayContaining(['top', 'child']));
+      expect(parsed.finalOutputPorts.map((node: Record<string, any>) => node.qualifiedName)).toContain('top::data_out');
+      expect(parsed.derivations).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          target: expect.objectContaining({ qualifiedName: 'child::dout' }),
+          expression: 'valid ? din : 8\'h00',
+        }),
+      ]));
+      expect(parsed.upstream.nodes.map((node: Record<string, any>) => node.qualifiedName)).toEqual(expect.arrayContaining([
+        'top::data_out',
+        'top::mid_data',
+        'child::dout',
+        'child::din',
+        'top::data_in',
+      ]));
+      expect(parsed.upstream.edges).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'signal_dependency',
+          source: expect.objectContaining({ qualifiedName: 'top::mid_data' }),
+          target: expect.objectContaining({ qualifiedName: 'top::data_out' }),
+        }),
+        expect.objectContaining({
+          kind: 'instance_output',
+          source: expect.objectContaining({ qualifiedName: 'child::dout' }),
+          target: expect.objectContaining({ qualifiedName: 'top::mid_data' }),
+        }),
+      ]));
+    } finally {
+      handler.closeAll();
+    }
+  });
 });

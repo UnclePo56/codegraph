@@ -22,8 +22,9 @@ describe('CODEGRAPH_MCP_TOOLS allowlist', () => {
     const all = listed();
     expect(all).toContain('codegraph_explore');
     expect(all).toContain('codegraph_context');
+    expect(all).toContain('codegraph_hdl_signal_trace');
     expect(all).toContain('codegraph_trace');
-    expect(all.length).toBeGreaterThanOrEqual(10);
+    expect(all.length).toBeGreaterThanOrEqual(11);
   });
 
   it('filters ListTools to the allowlisted short names', () => {
@@ -38,7 +39,7 @@ describe('CODEGRAPH_MCP_TOOLS allowlist', () => {
 
   it('treats an empty/whitespace value as unset (full surface)', () => {
     process.env[ENV] = '   ';
-    expect(listed().length).toBeGreaterThanOrEqual(10);
+    expect(listed().length).toBeGreaterThanOrEqual(11);
   });
 
   it('rejects a disabled tool on execute (defense in depth)', async () => {
