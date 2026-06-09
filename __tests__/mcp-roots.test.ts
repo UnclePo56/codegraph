@@ -21,6 +21,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { CodeGraph } from '../src';
+import { killChildAndWait, rmDirWithRetries } from './__helpers__/cleanup';
 
 const BIN = path.resolve(__dirname, '../dist/bin/codegraph.js');
 
@@ -84,13 +85,11 @@ describe('MCP project resolution via roots/list (issue #196)', () => {
     projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-mcp-proj-'));
   });
 
-  afterEach(() => {
-    if (child && !child.killed) {
-      child.kill('SIGKILL');
-      child = null;
-    }
-    fs.rmSync(cwdDir, { recursive: true, force: true });
-    fs.rmSync(projectDir, { recursive: true, force: true });
+  afterEach(async () => {
+    await killChildAndWait(child);
+    child = null;
+    await rmDirWithRetries(cwdDir);
+    await rmDirWithRetries(projectDir);
   });
 
   it('resolves the project from the client roots/list when no rootUri is sent', async () => {

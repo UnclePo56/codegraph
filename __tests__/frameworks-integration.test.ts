@@ -4,6 +4,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { CodeGraph } from '../src';
 import { initGrammars, loadAllGrammars } from '../src/extraction/grammars';
+import { rmDirWithRetries } from './__helpers__/cleanup';
 
 beforeAll(async () => {
   await initGrammars();
@@ -609,8 +610,8 @@ describe('Java end-to-end — field-injected bean trace (issue #389)', () => {
 
 describe('JVM FQN imports — end-to-end', () => {
   let tmpDir: string | undefined;
-  afterEach(() => {
-    if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
+  afterEach(async () => {
+    await rmDirWithRetries(tmpDir);
     tmpDir = undefined;
   });
 
@@ -659,13 +660,17 @@ describe('JVM FQN imports — end-to-end', () => {
     );
 
     const cg = CodeGraph.initSync(tmpDir);
-    await cg.indexAll();
+    try {
+      await cg.indexAll();
 
-    const util = cg.getNodesByKind('function').find((n) => n.qualifiedName === 'com.example::util');
-    expect(util, 'top-level util() should be extracted under com.example').toBeDefined();
+      const util = cg.getNodesByKind('function').find((n) => n.qualifiedName === 'com.example::util');
+      expect(util, 'top-level util() should be extracted under com.example').toBeDefined();
 
-    const edge = cg.getIncomingEdges(util!.id).find((e) => e.kind === 'imports');
-    expect(edge, 'imports edge should reach the top-level function by FQN').toBeDefined();
+      const edge = cg.getIncomingEdges(util!.id).find((e) => e.kind === 'imports');
+      expect(edge, 'imports edge should reach the top-level function by FQN').toBeDefined();
+    } finally {
+      cg.close();
+    }
   });
 
   it('resolves cross-language: Kotlin importing a Java class', async () => {
@@ -680,13 +685,17 @@ describe('JVM FQN imports — end-to-end', () => {
     );
 
     const cg = CodeGraph.initSync(tmpDir);
-    await cg.indexAll();
+    try {
+      await cg.indexAll();
 
-    const javaBar = cg.getNodesByKind('class').find((n) => n.qualifiedName === 'com.example::JavaBar');
-    expect(javaBar, 'JavaBar should be extracted under com.example regardless of language').toBeDefined();
+      const javaBar = cg.getNodesByKind('class').find((n) => n.qualifiedName === 'com.example::JavaBar');
+      expect(javaBar, 'JavaBar should be extracted under com.example regardless of language').toBeDefined();
 
-    const edge = cg.getIncomingEdges(javaBar!.id).find((e) => e.kind === 'imports');
-    expect(edge, 'Kotlin caller should resolve its import to the Java class').toBeDefined();
+      const edge = cg.getIncomingEdges(javaBar!.id).find((e) => e.kind === 'imports');
+      expect(edge, 'Kotlin caller should resolve its import to the Java class').toBeDefined();
+    } finally {
+      cg.close();
+    }
   });
 
   it('disambiguates a class-name collision across packages', async () => {
@@ -712,26 +721,30 @@ describe('JVM FQN imports — end-to-end', () => {
     );
 
     const cg = CodeGraph.initSync(tmpDir);
-    await cg.indexAll();
+    try {
+      await cg.indexAll();
 
-    const alphaBar = cg.getNodesByKind('class').find((n) => n.qualifiedName === 'com.example.alpha::Bar');
-    const betaBar = cg.getNodesByKind('class').find((n) => n.qualifiedName === 'com.example.beta::Bar');
-    expect(alphaBar).toBeDefined();
-    expect(betaBar).toBeDefined();
-    expect(alphaBar!.id).not.toBe(betaBar!.id);
+      const alphaBar = cg.getNodesByKind('class').find((n) => n.qualifiedName === 'com.example.alpha::Bar');
+      const betaBar = cg.getNodesByKind('class').find((n) => n.qualifiedName === 'com.example.beta::Bar');
+      expect(alphaBar).toBeDefined();
+      expect(betaBar).toBeDefined();
+      expect(alphaBar!.id).not.toBe(betaBar!.id);
 
-    // Each Bar receives exactly one imports edge — from its own caller.
-    const alphaIncoming = cg.getIncomingEdges(alphaBar!.id).filter((e) => e.kind === 'imports');
-    const betaIncoming = cg.getIncomingEdges(betaBar!.id).filter((e) => e.kind === 'imports');
-    expect(alphaIncoming.length).toBeGreaterThan(0);
-    expect(betaIncoming.length).toBeGreaterThan(0);
+      // Each Bar receives exactly one imports edge — from its own caller.
+      const alphaIncoming = cg.getIncomingEdges(alphaBar!.id).filter((e) => e.kind === 'imports');
+      const betaIncoming = cg.getIncomingEdges(betaBar!.id).filter((e) => e.kind === 'imports');
+      expect(alphaIncoming.length).toBeGreaterThan(0);
+      expect(betaIncoming.length).toBeGreaterThan(0);
 
-    // Sanity: the edges don't cross — alpha's incoming sources don't include
-    // beta's filePath and vice versa.
-    const sourceFiles = (edges: typeof alphaIncoming) =>
-      edges.map((e) => cg.getNode(e.source)?.filePath).filter(Boolean);
-    expect(sourceFiles(alphaIncoming).some((p) => p?.includes('CallerA.kt'))).toBe(true);
-    expect(sourceFiles(betaIncoming).some((p) => p?.includes('CallerB.kt'))).toBe(true);
+      // Sanity: the edges don't cross — alpha's incoming sources don't include
+      // beta's filePath and vice versa.
+      const sourceFiles = (edges: typeof alphaIncoming) =>
+        edges.map((e) => cg.getNode(e.source)?.filePath).filter(Boolean);
+      expect(sourceFiles(alphaIncoming).some((p) => p?.includes('CallerA.kt'))).toBe(true);
+      expect(sourceFiles(betaIncoming).some((p) => p?.includes('CallerB.kt'))).toBe(true);
+    } finally {
+      cg.close();
+    }
   });
 });
 

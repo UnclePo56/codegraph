@@ -17,6 +17,7 @@ import type { UnresolvedRef } from '../src/resolution/types';
 import { detectFrameworks, getAllFrameworkResolvers } from '../src/resolution/frameworks';
 import { QueryBuilder } from '../src/db/queries';
 import { DatabaseConnection } from '../src/db';
+import { rmDirWithRetries } from './__helpers__/cleanup';
 
 describe('Resolution Module', () => {
   let tempDir: string;
@@ -27,13 +28,13 @@ describe('Resolution Module', () => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-resolution-test-'));
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     // Clean up
     if (cg) {
       cg.destroy();
-    } else if (fs.existsSync(tempDir)) {
-      fs.rmSync(tempDir, { recursive: true });
+      cg = undefined as unknown as CodeGraph;
     }
+    await rmDirWithRetries(tempDir);
   });
 
   describe('Name Matcher', () => {
@@ -1557,6 +1558,7 @@ func main() {
     // feature can't silently regress to a no-op in the indexing flow.
     it('connects #include to the real header file via include-dir scan (end-to-end)', async () => {
       const tempProject = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-cpp-e2e-'));
+      let db: DatabaseConnection | undefined;
       try {
         fs.mkdirSync(path.join(tempProject, 'include'), { recursive: true });
         fs.mkdirSync(path.join(tempProject, 'src'), { recursive: true });
@@ -1579,7 +1581,7 @@ func main() {
         // The `#include "utils.h"` edge should target the real
         // `include/utils.h` file node — not a floating `import` node
         // living inside main.cpp.
-        const db = DatabaseConnection.open(path.join(tempProject, '.codegraph', 'codegraph.db'));
+        db = DatabaseConnection.open(path.join(tempProject, '.codegraph', 'codegraph.db'));
         const rows = db.getDb().prepare(`
           select dst.kind as dstKind, dst.file_path as dstPath
           from edges e
@@ -1599,7 +1601,12 @@ func main() {
         );
         expect(stdlibFile).toBeUndefined();
       } finally {
-        fs.rmSync(tempProject, { recursive: true, force: true });
+        db?.close();
+        if (cg) {
+          cg.close();
+          cg = undefined as unknown as CodeGraph;
+        }
+        await rmDirWithRetries(tempProject);
       }
     });
   });

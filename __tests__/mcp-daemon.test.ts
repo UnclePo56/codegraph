@@ -39,6 +39,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { CodeGraph } from '../src';
 import { getDaemonSocketPath } from '../src/mcp/daemon-paths';
+import { killChildAndWait, rmDirWithRetries } from './__helpers__/cleanup';
 
 const BIN = path.resolve(__dirname, '../dist/bin/codegraph.js');
 
@@ -175,7 +176,7 @@ describe('Shared MCP daemon (issue #411)', () => {
   });
 
   afterEach(async () => {
-    killTree(...servers.map((s) => s.child));
+    await Promise.all(servers.map((s) => killChildAndWait(s.child)));
     // The daemon is detached (not a tracked child) — reap it explicitly via the
     // pid it recorded, so a test can't leak a background daemon. Guard against
     // our own pid: the version-mismatch test plants `pid: process.pid` in the
@@ -183,10 +184,10 @@ describe('Shared MCP daemon (issue #411)', () => {
     const daemonPid = readLockPid(realRoot);
     if (daemonPid && daemonPid !== process.pid && isAlive(daemonPid)) {
       try { process.kill(daemonPid, 'SIGKILL'); } catch { /* race */ }
+      await waitProcessExit(daemonPid, 5000);
     }
-    await new Promise((r) => setTimeout(r, 50));
     servers.length = 0;
-    fs.rmSync(tempDir, { recursive: true, force: true });
+    await rmDirWithRetries(tempDir);
   });
 
   it('two invocations share ONE detached daemon; both attach as proxies', async () => {
