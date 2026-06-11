@@ -43,6 +43,12 @@ import { join, resolve as resolvePath } from 'path';
 /** Maximum output length to prevent context bloat (characters) */
 const MAX_OUTPUT_LENGTH = 15000;
 
+type HdlInstantiationEntry = {
+  node: Node;
+  edge: Edge;
+  instance?: Node;
+};
+
 /**
  * Maximum length for free-form string inputs (query, task, symbol).
  * Bounds memory and CPU when a buggy or hostile MCP client sends a
@@ -522,13 +528,13 @@ export const tools: ToolDefinition[] = [
   },
   {
     name: 'codegraph_callers',
-    description: 'List functions that call <symbol>. For deep flow use codegraph_trace.',
+    description: 'List functions that call <symbol>. For HDL, list modules/instances that instantiate the symbol and report instantiate-at sites. For deep flow use codegraph_trace.',
     inputSchema: {
       type: 'object',
       properties: {
         symbol: {
           type: 'string',
-          description: 'Name of the function, method, or class to find callers for',
+          description: 'Name of the function, method, class, or HDL module to find callers / instantiate-at sites for',
         },
         limit: {
           type: 'number',
@@ -542,13 +548,13 @@ export const tools: ToolDefinition[] = [
   },
   {
     name: 'codegraph_callees',
-    description: 'List functions that <symbol> calls. For deep flow use codegraph_trace.',
+    description: 'List functions that <symbol> calls. For HDL, list modules instantiated by <symbol>. For deep flow use codegraph_trace.',
     inputSchema: {
       type: 'object',
       properties: {
         symbol: {
           type: 'string',
-          description: 'Name of the function, method, or class to find callees for',
+          description: 'Name of the function, method, class, or HDL module to find callees / instantiated modules for',
         },
         limit: {
           type: 'number',
@@ -582,7 +588,7 @@ export const tools: ToolDefinition[] = [
   },
   {
     name: 'codegraph_node',
-    description: 'One symbol\'s location, signature, callers/callees trail. includeCode=true returns the verbatim body. Use codegraph_trace for full paths instead of chaining nodes.',
+    description: 'One symbol\'s location, signature, language-aware relationship trail. For HDL, the trail uses instantiate-at semantics instead of callers/callees. includeCode=true returns the verbatim body. Use codegraph_trace for full paths instead of chaining nodes.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1517,6 +1523,31 @@ export class ToolHandler {
       return this.textResult(`Symbol "${symbol}" not found in the codebase`);
     }
 
+    const hdlMatches = allMatches.nodes.filter(isHdlNode);
+    if (hdlMatches.length > 0) {
+      const seen = new Set<string>();
+      const entries: HdlInstantiationEntry[] = [];
+      for (const node of hdlMatches) {
+        for (const entry of this.getHdlInstantiateAt(cg, node)) {
+          const key = this.hdlInstantiationEntryKey(entry);
+          if (seen.has(key)) continue;
+          seen.add(key);
+          entries.push(entry);
+        }
+      }
+
+      if (entries.length === 0) {
+        return this.textResult(`No instantiate-at sites found for "${symbol}"${allMatches.note}`);
+      }
+
+      const formatted = this.formatHdlInstantiationList(
+        cg,
+        entries.slice(0, limit),
+        `Instantiated at ${symbol}`,
+      ) + allMatches.note;
+      return this.textResult(this.truncateOutput(formatted));
+    }
+
     // Aggregate callers across all matching symbols
     const seen = new Set<string>();
     const allCallers: Node[] = [];
@@ -1550,6 +1581,31 @@ export class ToolHandler {
     const allMatches = this.findAllSymbols(cg, symbol);
     if (allMatches.nodes.length === 0) {
       return this.textResult(`Symbol "${symbol}" not found in the codebase`);
+    }
+
+    const hdlMatches = allMatches.nodes.filter(isHdlNode);
+    if (hdlMatches.length > 0) {
+      const seen = new Set<string>();
+      const entries: HdlInstantiationEntry[] = [];
+      for (const node of hdlMatches) {
+        for (const entry of this.getHdlInstantiatedModules(cg, node)) {
+          const key = this.hdlInstantiationEntryKey(entry);
+          if (seen.has(key)) continue;
+          seen.add(key);
+          entries.push(entry);
+        }
+      }
+
+      if (entries.length === 0) {
+        return this.textResult(`No instantiated modules found for "${symbol}"${allMatches.note}`);
+      }
+
+      const formatted = this.formatHdlInstantiationList(
+        cg,
+        entries.slice(0, limit),
+        `Instantiates from ${symbol}`,
+      ) + allMatches.note;
+      return this.textResult(this.truncateOutput(formatted));
     }
 
     // Aggregate callees across all matching symbols
@@ -3078,6 +3134,10 @@ export class ToolHandler {
    * a signal (read that one hop) rather than a dead end.
    */
   private formatTrail(cg: CodeGraph, node: Node): string {
+    if (isHdlNode(node)) {
+      return this.formatHdlTrail(cg, node);
+    }
+
     const TRAIL_CAP = 12;
     const fmt = (e: { node: Node; edge: Edge }) => {
       const base = `${e.node.name} (${e.node.filePath}:${e.node.startLine})`;
@@ -3105,6 +3165,200 @@ export class ToolHandler {
       lines.push(`**Called by ←** ${callers.slice(0, TRAIL_CAP).map(fmt).join(', ')}${callers.length > TRAIL_CAP ? `, +${callers.length - TRAIL_CAP} more` : ''}`);
     }
     return lines.join('\n');
+  }
+
+  private formatHdlTrail(cg: CodeGraph, node: Node): string {
+    const TRAIL_CAP = 12;
+    const instantiatedModules = this.getHdlInstantiatedModules(cg, node);
+    const instantiateAt = this.getHdlInstantiateAt(cg, node);
+
+    if (instantiatedModules.length === 0 && instantiateAt.length === 0) return '';
+
+    const lines: string[] = ['', '### HDL Trail — codegraph_node any of these to follow it (no Read needed)'];
+    if (instantiatedModules.length > 0) {
+      lines.push(
+        `**Instantiates →** ${instantiatedModules.slice(0, TRAIL_CAP).map((entry) => (
+          this.formatHdlInstantiationTrailEntry(cg, entry)
+        )).join(', ')}${instantiatedModules.length > TRAIL_CAP ? `, +${instantiatedModules.length - TRAIL_CAP} more` : ''}`,
+      );
+    }
+    if (instantiateAt.length > 0) {
+      lines.push(
+        `**Instantiated at ←** ${instantiateAt.slice(0, TRAIL_CAP).map((entry) => (
+          this.formatHdlInstantiationTrailEntry(cg, entry)
+        )).join(', ')}${instantiateAt.length > TRAIL_CAP ? `, +${instantiateAt.length - TRAIL_CAP} more` : ''}`,
+      );
+    }
+    return lines.join('\n');
+  }
+
+  private getHdlInstantiatedModules(cg: CodeGraph, node: Node): HdlInstantiationEntry[] {
+    const instanceEntries: HdlInstantiationEntry[] = [];
+    for (const instance of this.getHdlInstances(cg, node)) {
+      const targetName = stringValue(hdlMetadata(instance).targetModule);
+      if (!targetName) continue;
+      const target = this.findHdlModuleByName(cg, targetName);
+      if (!target) continue;
+      instanceEntries.push({
+        node: target,
+        edge: this.findHdlInstantiationEdgeForInstance(cg, node, target, instance),
+        instance,
+      });
+    }
+    if (instanceEntries.length > 0) return instanceEntries;
+
+    const edges = this.getHdlInstantiationEdges(cg, node.id, 'outgoing');
+    return this.collectHdlEdgeNodes(cg, edges, 'target');
+  }
+
+  private getHdlInstantiateAt(cg: CodeGraph, node: Node): HdlInstantiationEntry[] {
+    const edges = this.getHdlInstantiationEdges(cg, node.id, 'incoming');
+    const entries: HdlInstantiationEntry[] = [];
+
+    for (const edge of edges) {
+      const source = cg.getNode(edge.source);
+      if (!source || !isHdlNode(source)) continue;
+
+      const instances = this.getHdlInstances(cg, source)
+        .filter((instance) => stringValue(hdlMetadata(instance).targetModule) === node.name);
+      if (instances.length === 0) {
+        entries.push({ node: source, edge });
+        continue;
+      }
+
+      for (const instance of instances) {
+        entries.push({
+          node: source,
+          edge: this.findHdlInstantiationEdgeForInstance(cg, source, node, instance),
+          instance,
+        });
+      }
+    }
+
+    if (hdlRole(node) === 'instance') {
+      const containingModules = cg.getIncomingEdges(node.id)
+        .filter((edge) => edge.kind === 'contains')
+        .map((edge) => {
+          const parent = cg.getNode(edge.source);
+          return parent && isHdlNode(parent) ? { node: parent, edge } : null;
+        })
+        .filter((entry): entry is HdlInstantiationEntry => Boolean(entry));
+      entries.push(...containingModules);
+    }
+
+    return entries;
+  }
+
+  private getHdlInstantiationEdges(
+    cg: CodeGraph,
+    nodeId: string,
+    direction: 'incoming' | 'outgoing',
+  ): Edge[] {
+    const edges = direction === 'incoming'
+      ? cg.getIncomingEdges(nodeId)
+      : cg.getOutgoingEdges(nodeId);
+    const connects = edges.filter((edge) => edge.kind === 'connects');
+    return connects.length > 0
+      ? connects
+      : edges.filter((edge) => edge.kind === 'instantiates');
+  }
+
+  private collectHdlEdgeNodes(
+    cg: CodeGraph,
+    edges: Edge[],
+    endpoint: 'source' | 'target',
+  ): HdlInstantiationEntry[] {
+    const seen = new Set<string>();
+    const entries: HdlInstantiationEntry[] = [];
+    for (const edge of edges) {
+      const next = cg.getNode(endpoint === 'source' ? edge.source : edge.target);
+      const key = `${edge.source}:${edge.target}:${edge.kind}:${edge.line ?? ''}:${edge.column ?? ''}`;
+      if (!next || !isHdlNode(next) || seen.has(key)) continue;
+      seen.add(key);
+      entries.push({ node: next, edge });
+    }
+    return entries;
+  }
+
+  private findHdlInstantiationEdgeForInstance(
+    cg: CodeGraph,
+    source: Node,
+    target: Node,
+    instance: Node,
+  ): Edge {
+    const edges = this.getHdlInstantiationEdges(cg, source.id, 'outgoing')
+      .filter((edge) => edge.target === target.id);
+    return edges.find((edge) => edge.line === instance.startLine)
+      ?? edges[0]
+      ?? {
+        source: source.id,
+        target: target.id,
+        kind: 'connects',
+        line: instance.startLine,
+        column: instance.startColumn,
+        provenance: 'tree-sitter',
+      };
+  }
+
+  private formatHdlInstantiationTrailEntry(cg: CodeGraph, entry: HdlInstantiationEntry): string {
+    const base = `${entry.node.name} (${entry.node.filePath}:${entry.node.startLine})`;
+    return `${base} [${this.formatHdlInstantiateAt(cg, entry)}]`;
+  }
+
+  private hdlInstantiationEntryKey(entry: HdlInstantiationEntry): string {
+    return [
+      entry.node.id,
+      entry.instance?.id ?? '',
+      entry.edge.source,
+      entry.edge.target,
+      entry.edge.kind,
+      entry.edge.line ?? '',
+      entry.edge.column ?? '',
+    ].join(':');
+  }
+
+  private formatHdlInstantiationList(
+    cg: CodeGraph,
+    entries: HdlInstantiationEntry[],
+    title: string,
+  ): string {
+    const lines: string[] = [`## ${title} (${entries.length} found)`, ''];
+    for (const entry of entries) {
+      const location = entry.node.startLine ? `:${entry.node.startLine}` : '';
+      lines.push(
+        `- ${entry.node.name} (${entry.node.kind}) - ${entry.node.filePath}${location} ` +
+        `[${this.formatHdlInstantiateAt(cg, entry)}]`,
+      );
+    }
+    return lines.join('\n');
+  }
+
+  private formatHdlInstantiateAt(cg: CodeGraph, entry: HdlInstantiationEntry): string {
+    const edge = entry.edge;
+    const source = cg.getNode(edge.source);
+    const target = cg.getNode(edge.target);
+    const owner = source?.filePath ? source : target;
+    const filePath = owner?.filePath ?? 'unknown';
+    const line = entry.instance?.startLine ?? edge.line ?? target?.startLine ?? source?.startLine;
+    const suffix = line ? `${filePath}:${line}` : filePath;
+    const instances = entry.instance ? [entry.instance.name] : this.getHdlInstanceNamesForEdge(cg, edge);
+    const via = instances.length > 0 ? ` via ${instances.join(', ')}` : '';
+    return `instantiate at ${suffix}${via}`;
+  }
+
+  private getHdlInstanceNamesForEdge(cg: CodeGraph, edge: Edge): string[] {
+    const source = cg.getNode(edge.source);
+    const target = cg.getNode(edge.target);
+    if (!source || !target || !isHdlNode(source) || !isHdlNode(target)) return [];
+
+    const instances = this.getHdlInstances(cg, source)
+      .filter((inst) => stringValue(hdlMetadata(inst).targetModule) === target.name);
+    if (edge.line === undefined) {
+      return instances.map((inst) => inst.name);
+    }
+
+    const sameLine = instances.filter((inst) => inst.startLine === edge.line);
+    return sameLine.map((inst) => inst.name);
   }
 
   /**

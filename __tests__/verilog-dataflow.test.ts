@@ -139,6 +139,85 @@ endmodule
     ))).toBe(true);
   });
 
+  it('labels HDL module relationships as instantiate-at sites', async () => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-hdl-trail-'));
+
+    fs.writeFileSync(path.join(tempDir, 'child.sv'), `
+module child (
+  input  logic [7:0] din,
+  output logic [7:0] dout
+);
+assign dout = din;
+endmodule
+`);
+
+    fs.writeFileSync(path.join(tempDir, 'top.sv'), `
+module top (
+  input  logic [7:0] data_in,
+  output logic [7:0] data_out
+);
+child u_child (
+  .din  (data_in),
+  .dout (data_out)
+);
+child u_child_b (
+  .din  (data_in),
+  .dout (data_out)
+);
+endmodule
+`);
+
+    cg = await CodeGraph.init(tempDir, { index: true });
+    const handler = new ToolHandler(cg);
+
+    try {
+      const topNode = await handler.execute('codegraph_node', {
+        symbol: 'top',
+        projectPath: tempDir,
+      });
+      const topText = topNode.content[0]?.type === 'text' ? topNode.content[0].text : '';
+      expect(topText).toContain('### HDL Trail');
+      expect(topText).toContain('**Instantiates →** child');
+      expect(topText).toContain('instantiate at top.sv:6 via u_child');
+      expect(topText).toContain('instantiate at top.sv:10 via u_child_b');
+      expect(topText).not.toContain('**Calls →**');
+
+      const childNode = await handler.execute('codegraph_node', {
+        symbol: 'child',
+        projectPath: tempDir,
+      });
+      const childText = childNode.content[0]?.type === 'text' ? childNode.content[0].text : '';
+      expect(childText).toContain('**Instantiated at ←** top');
+      expect(childText).toContain('instantiate at top.sv:6 via u_child');
+      expect(childText).toContain('instantiate at top.sv:10 via u_child_b');
+      expect(childText).not.toContain('**Called by ←**');
+
+      const callees = await handler.execute('codegraph_callees', {
+        symbol: 'top',
+        projectPath: tempDir,
+      });
+      const calleesText = callees.content[0]?.type === 'text' ? callees.content[0].text : '';
+      expect(calleesText).toContain('## Instantiates from top');
+      expect(calleesText).toContain('## Instantiates from top (2 found)');
+      expect(calleesText.match(/- child \(module\) - child\.sv:2/g)?.length).toBe(2);
+      expect(calleesText).toContain('instantiate at top.sv:6 via u_child');
+      expect(calleesText).toContain('instantiate at top.sv:10 via u_child_b');
+
+      const callers = await handler.execute('codegraph_callers', {
+        symbol: 'child',
+        projectPath: tempDir,
+      });
+      const callersText = callers.content[0]?.type === 'text' ? callers.content[0].text : '';
+      expect(callersText).toContain('## Instantiated at child');
+      expect(callersText).toContain('## Instantiated at child (2 found)');
+      expect(callersText.match(/- top \(module\) - top\.sv:2/g)?.length).toBe(2);
+      expect(callersText).toContain('instantiate at top.sv:6 via u_child');
+      expect(callersText).toContain('instantiate at top.sv:10 via u_child_b');
+    } finally {
+      handler.closeAll();
+    }
+  });
+
   it('reports global HDL signal flow through modules, derivations, and output ports', async () => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-hdl-flow-'));
 

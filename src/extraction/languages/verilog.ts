@@ -816,24 +816,24 @@ function handleInstantiation(node: SyntaxNode, ctx: ExtractorContext): boolean {
   const parentId = ctx.nodeStack[ctx.nodeStack.length - 1];
   const parameterOverrides = parseNamedAssociations(parameterOverrideBody(getNodeText(node, ctx.source)) ?? '');
 
-  if (parentId) {
-    for (const referenceKind of ['instantiates', 'connects'] as const) {
-      ctx.addUnresolvedReference({
-        fromNodeId: parentId,
-        referenceName: targetName,
-        referenceKind,
-        line: targetNode.startPosition.row + 1,
-        column: targetNode.startPosition.column,
-      });
-    }
-  }
-
   const instances = activeDescendantsOfType(node, new Set(['hierarchical_instance']), ctx);
   for (const inst of instances) {
     const nameOfInstance = firstDescendantOfType(inst, new Set(['name_of_instance']));
     const instName = firstIdentifier(nameOfInstance ?? inst);
     if (!instName) continue;
     const instanceName = cleanIdentifier(getNodeText(instName, ctx.source));
+
+    if (parentId) {
+      for (const referenceKind of ['instantiates', 'connects'] as const) {
+        ctx.addUnresolvedReference({
+          fromNodeId: parentId,
+          referenceName: targetName,
+          referenceKind,
+          line: instName.startPosition.row + 1,
+          column: instName.startPosition.column,
+        });
+      }
+    }
 
     const portConnectionNodes = activeDescendantsOfType(inst, new Set(['named_port_connection']), ctx);
     const parsedConnections = portConnectionNodes
