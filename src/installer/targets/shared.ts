@@ -43,6 +43,14 @@ export function getMcpServerInvocation(): { command: string; args: string[] } {
         ],
       };
     }
+
+    const builtCli = path.join(__dirname, '..', '..', 'bin', 'codegraph.js');
+    if (fs.existsSync(builtCli)) {
+      return {
+        command: process.execPath,
+        args: [builtCli, 'serve', '--mcp'],
+      };
+    }
   }
 
   return {
