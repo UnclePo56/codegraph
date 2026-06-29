@@ -157,6 +157,10 @@ const DEFAULT_IGNORE_PATTERNS: string[] = [
   '*.egg-info/',     // Python packaging metadata
   'cmake-build-*/',  // CLion / CMake build trees
   'bazel-*/',        // Bazel output symlink trees
+  '*_Runs/',         // FPGA/EDA implementation run trees
+  'xsim.dir/',       // Xilinx simulator work directory
+  '*.ipr.v',         // FPGA/EDA generated protected/netlist Verilog
+  '*_phy_sim*.v',    // FPGA/EDA generated physical simulation netlists
 ];
 
 /**

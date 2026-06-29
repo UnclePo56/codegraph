@@ -3402,6 +3402,32 @@ describe('Directory Exclusion', () => {
     expect(files[0]).toBe('src/components/Button.tsx');
     expect(files[0]).not.toContain('\\');
   });
+
+  it('should exclude generated FPGA/EDA netlists by default', () => {
+    const srcDir = path.join(tempDir, 'rtl', 'src');
+    const tdNetlistDir = path.join(tempDir, 'rtl', 'lbus', 'src', 'netlist');
+    const runDir = path.join(tempDir, 'pwm_module', 'prj', 'pwm_module_Runs', 'impl');
+    const simDir = path.join(tempDir, 'simulation');
+    const xsimDir = path.join(tempDir, 'xsim.dir', 'work');
+    fs.mkdirSync(srcDir, { recursive: true });
+    fs.mkdirSync(tdNetlistDir, { recursive: true });
+    fs.mkdirSync(runDir, { recursive: true });
+    fs.mkdirSync(simDir, { recursive: true });
+    fs.mkdirSync(xsimDir, { recursive: true });
+    fs.writeFileSync(path.join(srcDir, 'top.v'), 'module top; endmodule\n');
+    fs.writeFileSync(path.join(tdNetlistDir, 'some_module_001.ipr.v'), 'module generated; endmodule\n');
+    fs.writeFileSync(path.join(runDir, 'impl_netlist.v'), 'module impl_netlist; endmodule\n');
+    fs.writeFileSync(path.join(simDir, 'core_phy_sim.v'), 'module core_phy_sim; endmodule\n');
+    fs.writeFileSync(path.join(xsimDir, 'xsim_work.sv'), 'module xsim_work; endmodule\n');
+
+    const files = scanDirectory(tempDir);
+
+    expect(files).toContain('rtl/src/top.v');
+    expect(files).not.toContain('rtl/lbus/src/netlist/some_module_001.ipr.v');
+    expect(files).not.toContain('pwm_module/prj/pwm_module_Runs/impl/impl_netlist.v');
+    expect(files).not.toContain('simulation/core_phy_sim.v');
+    expect(files).not.toContain('xsim.dir/work/xsim_work.sv');
+  });
 });
 
 describe('Git Submodules', () => {
