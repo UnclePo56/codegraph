@@ -11,19 +11,14 @@
  * decides whether to Read the specific stale file. These tests exercise
  * the full real path: real CodeGraph index + real ToolHandler.execute().
  *
- * **chokidar is mocked** (see __helpers__/chokidar-mock.ts): the real
- * FSEvents/inotify event delivery is non-deterministic under parallel
- * vitest execution and produced a consistent ~30% failure rate on these
- * tests when run inside the full suite. The mock replaces chokidar with
- * a controllable EventEmitter so the tests synthesize file events
- * deterministically via `triggerFileEvent(...)` instead of waiting on
- * the OS-level watcher to deliver. The watcher's actual debounce timer
- * (real setTimeout) is left untouched.
+ * **Event delivery uses a synthetic seam** (`__emitWatchEventForTests`): the
+ * real native fs.watch (FSEvents/inotify) delivery is non-deterministic under
+ * parallel vitest execution and produced a consistent ~30% failure rate on
+ * these tests when run inside the full suite. The seam drives the watcher's
+ * pending-set pipeline directly so the tests synthesize file events
+ * deterministically. The watcher's actual debounce timer (real setTimeout) is
+ * left untouched.
  */
-
-import { vi } from 'vitest';
-// Hoisted: chokidar is replaced by the controllable mock for this file.
-vi.mock('chokidar', async () => (await import('./__helpers__/chokidar-mock')).chokidarMockModule);
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs';
@@ -31,7 +26,7 @@ import * as path from 'path';
 import * as os from 'os';
 import CodeGraph from '../src/index';
 import { ToolHandler } from '../src/mcp/tools';
-import { triggerFileEvent } from './__helpers__/chokidar-mock';
+import { __emitWatchEventForTests, __setFsWatchForTests } from '../src/sync/watcher';
 
 function waitFor(condition: () => boolean, timeoutMs = 2000, intervalMs = 25): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -76,14 +71,28 @@ describe('MCP staleness banner', () => {
   });
 
   afterEach(() => {
+    __setFsWatchForTests(null); // reset the injected fs.watch seam
     try { cg.unwatch(); } catch { /* ignore */ }
     try { cg.close(); } catch { /* ignore */ }
     if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
   });
 
+  // Force watch-resource exhaustion at startup so the real watcher degrades
+  // deterministically on any platform (recursive or per-directory strategy).
+  const degradeWatcher = () => {
+    __setFsWatchForTests(() => {
+      const err = new Error('too many open files') as NodeJS.ErrnoException;
+      err.code = 'EMFILE';
+      throw err;
+    });
+    const started = cg.watch({ debounceMs: 1000 }); // real (non-inert) watcher
+    expect(started).toBe(false);
+    expect(cg.isWatcherDegraded()).toBe(true);
+  };
+
   it('prepends a stale banner when the response references a pending file', async () => {
     // Long debounce so the edit lingers in pendingFiles while we query.
-    cg.watch({ debounceMs: 4000 });
+    cg.watch({ debounceMs: 4000, inertForTests: true });
     await cg.waitUntilWatcherReady();
 
     // Real disk write so a later sync (if it fires) sees the new content,
@@ -93,7 +102,7 @@ describe('MCP staleness banner', () => {
       path.join(testDir, 'src', 'alpha-only.ts'),
       'export function alphaOnly() { return 99; }\n',
     );
-    triggerFileEvent(testDir, 'change', 'src/alpha-only.ts');
+    __emitWatchEventForTests(testDir, 'src/alpha-only.ts');
 
     // With mocked chokidar this is synchronous — keep the wait just to
     // exercise the realistic shape (the watcher's `chokidarReady` gate
@@ -114,7 +123,7 @@ describe('MCP staleness banner', () => {
   });
 
   it('uses the footer (not the banner) when pending files are not referenced', async () => {
-    cg.watch({ debounceMs: 4000 });
+    cg.watch({ debounceMs: 4000, inertForTests: true });
     await cg.waitUntilWatcherReady();
 
     // Edit bravo-only.ts but search for the alphaOnly symbol, whose hit is
@@ -124,7 +133,7 @@ describe('MCP staleness banner', () => {
       path.join(testDir, 'src', 'bravo-only.ts'),
       'export function bravoOnly() { return 22; }\n',
     );
-    triggerFileEvent(testDir, 'change', 'src/bravo-only.ts');
+    __emitWatchEventForTests(testDir, 'src/bravo-only.ts');
     await waitFor(() => cg.getPendingFiles().some((p) => p.path === 'src/bravo-only.ts'));
 
     const res = await handler.execute('codegraph_search', { query: 'alphaOnly' });
@@ -136,14 +145,14 @@ describe('MCP staleness banner', () => {
   });
 
   it('drops the banner once the sync completes and clears the pending entry', async () => {
-    cg.watch({ debounceMs: 200 });
+    cg.watch({ debounceMs: 200, inertForTests: true });
     await cg.waitUntilWatcherReady();
 
     fs.writeFileSync(
       path.join(testDir, 'src', 'alpha-only.ts'),
       'export function alphaOnly() { return 7; }\n',
     );
-    triggerFileEvent(testDir, 'change', 'src/alpha-only.ts');
+    __emitWatchEventForTests(testDir, 'src/alpha-only.ts');
     // Wait through debounce (200ms) + sync; pendingFiles drains back to empty.
     await waitFor(() => cg.getPendingFiles().length === 0, 3000);
 
@@ -154,19 +163,19 @@ describe('MCP staleness banner', () => {
   });
 
   it('lists pending files under "Pending sync" in codegraph_status', async () => {
-    cg.watch({ debounceMs: 4000 });
+    cg.watch({ debounceMs: 4000, inertForTests: true });
     await cg.waitUntilWatcherReady();
 
     fs.writeFileSync(
       path.join(testDir, 'src', 'charlie-only.ts'),
       'export function charlieOnly() { return 33; }\n',
     );
-    triggerFileEvent(testDir, 'change', 'src/charlie-only.ts');
+    __emitWatchEventForTests(testDir, 'src/charlie-only.ts');
     await waitFor(() => cg.getPendingFiles().some((p) => p.path === 'src/charlie-only.ts'));
 
     const res = await handler.execute('codegraph_status', {});
     const text = res.content[0].text;
-    expect(text).toContain('### Pending sync:');
+    expect(text).toContain('**Pending sync:');
     expect(text).toContain('src/charlie-only.ts');
     // Status embeds the info first-class, so the auto-banner is suppressed.
     expect(text.startsWith('⚠️')).toBe(false);
@@ -174,5 +183,30 @@ describe('MCP staleness banner', () => {
 
   it('returns zero pending files when no watcher is active', () => {
     expect(cg.getPendingFiles()).toEqual([]);
+  });
+
+  it('prepends a whole-index degraded banner once live watching has permanently stopped (#876)', async () => {
+    degradeWatcher();
+
+    const res = await handler.execute('codegraph_search', { query: 'alphaOnly' });
+    expect(res.isError).toBeFalsy();
+    const text = res.content[0].text;
+
+    expect(text.startsWith('⚠️')).toBe(true);
+    expect(text).toMatch(/auto-sync is DISABLED/i);
+    expect(text).toMatch(/Read files directly/i);
+    expect(text).toContain('OS watch/file limit exhausted'); // the degrade reason
+    expect(text).toMatch(/alphaOnly/); // the real result still follows the banner
+  });
+
+  it('surfaces the degraded state as its own section in codegraph_status (#876)', async () => {
+    degradeWatcher();
+
+    const res = await handler.execute('codegraph_status', {});
+    const text = res.content[0].text;
+    expect(text).toContain('**Auto-sync disabled:');
+    expect(text).toContain('OS watch/file limit exhausted');
+    // status renders the notice inline, so the auto-banner is not also prepended.
+    expect(text.startsWith('⚠️')).toBe(false);
   });
 });

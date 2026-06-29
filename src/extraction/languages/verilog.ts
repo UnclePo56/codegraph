@@ -925,6 +925,7 @@ function handleMethodCall(node: SyntaxNode, ctx: ExtractorContext): boolean {
 }
 
 export const verilogExtractor: LanguageExtractor = {
+  preParse: preprocessVerilogSource,
   functionTypes: [],
   classTypes: [],
   methodTypes: [],

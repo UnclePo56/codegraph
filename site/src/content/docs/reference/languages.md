@@ -18,6 +18,7 @@ Language support is automatic from the file extension — there's nothing to con
 | Ruby | `.rb` | Full support |
 | C | `.c`, `.h` | Full support |
 | C++ | `.cpp`, `.hpp`, `.cc` | Full support |
+| Objective-C | `.m`, `.mm`, `.h` | Partial support (classes, protocols, methods, `@property`, `#import`, message sends; `.mm` ObjC++ may parse incompletely) |
 | Verilog | `.v`, `.vh` | Full support (modules, ports/signals as variables, parameters, nets, instances, functions, tasks, module-level `connects` graph, instance `port_connection` edges, active macro branch filtering via `CODEGRAPH_VERILOG_DEFINES`/`CODEGRAPH_HDL_DEFINES`) |
 | SystemVerilog | `.sv`, `.svh` | Full support (packages, interfaces, classes, typedefs, enums, structs, methods, ports/signals as variables, module/interface instances, module-level `connects` graph, instance `port_connection` edges, active macro branch filtering via `CODEGRAPH_VERILOG_DEFINES`/`CODEGRAPH_HDL_DEFINES`) |
 | Swift | `.swift` | Full support |
@@ -26,7 +27,9 @@ Language support is automatic from the file extension — there's nothing to con
 | Dart | `.dart` | Full support |
 | Svelte | `.svelte` | Full support (script extraction, Svelte 5 runes, SvelteKit routes) |
 | Vue | `.vue` | Full support (script + script-setup, Nuxt page/API/middleware routes) |
+| Astro | `.astro` | Full support (frontmatter + script extraction, template component/call references, `src/pages/` routes) |
 | Liquid | `.liquid` | Full support |
 | Pascal / Delphi | `.pas`, `.dpr`, `.dpk`, `.lpr` | Full support (classes, records, interfaces, enums, DFM/FMX forms) |
 | Lua | `.lua` | Full support (functions, methods, locals, `require` imports, call edges) |
+| R | `.R`, `.r` | Full support (functions, S4/R5/R6 classes with methods, `library`/`require` imports, `source()` file references, call edges) |
 | Luau | `.luau` | Full support (Lua, plus typed signatures, `type` aliases, Roblox `require`) |

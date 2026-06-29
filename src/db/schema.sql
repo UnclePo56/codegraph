@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     decorators TEXT, -- JSON array
     type_parameters TEXT, -- JSON array
     metadata TEXT, -- JSON object
+    return_type TEXT, -- normalized return/result type name (e.g. C++ method return, for receiver-type inference)
     updated_at INTEGER NOT NULL
 );
 

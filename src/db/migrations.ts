@@ -9,7 +9,7 @@ import { SqliteDatabase } from './sqlite-adapter';
 /**
  * Current schema version
  */
-export const CURRENT_SCHEMA_VERSION = 5;
+export const CURRENT_SCHEMA_VERSION = 6;
 
 /**
  * Migration definition
@@ -67,11 +67,27 @@ const migrations: Migration[] = [
   },
   {
     version: 5,
-    description: 'Add structured node metadata for language-specific graph annotations',
+    description:
+      'Add nodes.return_type — normalized return/result type for receiver-type inference (C++ singletons/factories, #645)',
     up: (db) => {
       db.exec(`
-        ALTER TABLE nodes ADD COLUMN metadata TEXT DEFAULT NULL;
+        ALTER TABLE nodes ADD COLUMN return_type TEXT;
       `);
+    },
+  },
+  {
+    version: 6,
+    description: 'Ensure node metadata and return type columns both exist',
+    up: (db) => {
+      const columns = new Set(
+        (db.prepare('PRAGMA table_info(nodes)').all() as Array<{ name: string }>).map((row) => row.name)
+      );
+      if (!columns.has('metadata')) {
+        db.exec('ALTER TABLE nodes ADD COLUMN metadata TEXT DEFAULT NULL;');
+      }
+      if (!columns.has('return_type')) {
+        db.exec('ALTER TABLE nodes ADD COLUMN return_type TEXT;');
+      }
     },
   },
 ];
